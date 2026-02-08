@@ -353,7 +353,7 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         setStep(tgId, "customer_wait_pickup");
         await tg("sendMessage", {
           chat_id: tgId,
-          text: "📍 Zəhmət olmasa götürülmə lokasiyanı göndər.",
+          text: "📍 Zəhmət olmasa götürülmə lokasiyanı göndər..",
           reply_markup: requestLocationKb("⬅️ Geri"),
         });
         return res.sendStatus(200);
