@@ -1,13 +1,15 @@
 /**
- * PayTaksi Telegram Bot (Render)
+ * PayTaksi Telegram Bot (Render) - ALL-IN-ONE
  * - Webhook: /tg/<WEBHOOK_SECRET>
- * - Customer: pickup location -> destination (text OR location) -> price -> send offer
+ * - Customer: pickup location -> destination location -> OSRM distance -> price (3.50 up to 3km, +0.40/km after)
  * - Driver: registration -> admin approval -> online -> receive offers -> accept/reject
- *
- * Pricing:
- *   3.50 AZN up to 3 km
- *   after 3 km: +0.40 AZN per each 1 km (ceil)
- * Payment: cash
+ * - Trip statuses: Arrived / Started / Finished / Cancelled (+ customer notifications)
+ * - Waze links: pickup + drop
+ * - Admin commands:
+ *    /admin           -> pending driver approvals
+ *    /admin_live      -> last 20 orders
+ *    /admin_drivers   -> top 50 approved drivers (online first)
+ *    /admin_order <id>-> order details + Waze links
  *
  * ENV:
  *   BOT_TOKEN=xxxxx
@@ -85,7 +87,7 @@ CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_id INTEGER,
   driver_id INTEGER,
-  status TEXT, -- searching/accepted/no_driver/cancelled
+  status TEXT, -- searching/accepted/arrived/in_trip/finished/cancelled/no_driver
   pickup_lat REAL,
   pickup_lon REAL,
   drop_lat REAL,
@@ -195,9 +197,33 @@ async function getDistanceKm(pLat, pLon, dLat, dLon) {
 }
 
 function calcPrice(distanceKm) {
-  if (distanceKm <= 3) return 3.5;
-  const extra = Math.ceil(distanceKm - 3);
-  return +(3.5 + extra * 0.4).toFixed(2);
+  const km = Math.max(0, Number(distanceKm) || 0);
+  if (km <= 3) return 3.5;
+  const extraKm = Math.ceil(km - 3);
+  return +(3.5 + extraKm * 0.4).toFixed(2);
+}
+
+// ---------------- Waze + UI ----------------
+function wazeLinkByLL(lat, lon) {
+  return `https://waze.com/ul?ll=${lat},${lon}&navigate=yes`;
+}
+function wazeLinkByQuery(q) {
+  return `https://waze.com/ul?q=${encodeURIComponent(q)}&navigate=yes`;
+}
+
+function driverStatusKb(orderId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📍 Gəldim", callback_data: `arrived:${orderId}` },
+        { text: "▶️ Başladım", callback_data: `starttrip:${orderId}` },
+      ],
+      [
+        { text: "🏁 Bitirdim", callback_data: `finish:${orderId}` },
+        { text: "❌ Ləğv et", callback_data: `cancel:${orderId}` },
+      ],
+    ],
+  };
 }
 
 // ---------------- UI texts ----------------
@@ -226,6 +252,13 @@ const STR = {
     orderAlreadyTaken: "⚠️ Bu sifariş artıq başqa sürücü tərəfindən götürüldü.",
     driverRejected: "❌ Sifarişi rədd etdin.",
     pendingNone: "Pending sürücü yoxdur.",
+
+    driverArrivedToCustomer: (id) => `📍 Sürücü gəldi. (Sifariş #${id})`,
+    tripStartedToCustomer: (id) => `▶️ Sürüş başladı. (Sifariş #${id})`,
+    tripFinishedToCustomer: (id, price) =>
+      `🏁 Sürüş bitdi. (Sifariş #${id})\n💰 Ödəniləcək: ${Number(price).toFixed(2)} AZN (nağd)`,
+    orderCancelledToCustomer: (id) => `❌ Sifariş ləğv edildi. (#${id})`,
+    orderCancelledToDriver: (id) => `❌ Sifarişi ləğv etdin. (#${id})`,
   },
 };
 
@@ -247,7 +280,10 @@ function mainKb(lang) {
 
 function locKb() {
   return {
-    keyboard: [[{ text: "📍 Lokasiya göndər", request_location: true }], [{ text: "⬅️ Geri" }]],
+    keyboard: [
+      [{ text: "📍 Lokasiya göndər", request_location: true }],
+      [{ text: "⬅️ Geri" }],
+    ],
     resize_keyboard: true,
   };
 }
@@ -275,22 +311,36 @@ function getCandidateDrivers(pLat, pLon, limit = OFFER_DRIVERS) {
     .all();
 
   return rows
-    .map((d) => ({ tg_id: d.tg_id, dist: haversineKm(pLat, pLon, d.last_lat, d.last_lon) }))
+    .map((d) => ({
+      tg_id: d.tg_id,
+      dist: haversineKm(pLat, pLon, d.last_lat, d.last_lon),
+    }))
     .sort((a, b) => a.dist - b.dist)
     .slice(0, limit);
 }
 
 async function sendDriverOffer(driverId, order) {
-  const waze = `https://waze.com/ul?ll=${order.pickup_lat},${order.pickup_lon}&navigate=yes`;
+  const pickupWaze = wazeLinkByLL(order.pickup_lat, order.pickup_lon);
+
+  let dropWaze = "-";
+  if (order.drop_lat && order.drop_lon) dropWaze = wazeLinkByLL(order.drop_lat, order.drop_lon);
+  else if (order.drop_text) dropWaze = wazeLinkByQuery(order.drop_text);
+
   await tg("sendMessage", {
     chat_id: driverId,
     text:
       `🚕 Yeni sifariş (#${order.id})\n` +
       `📍 Götürmə: ${order.pickup_lat.toFixed(5)}, ${order.pickup_lon.toFixed(5)}\n` +
-      `🎯 Təyinat: ${order.drop_text || (order.drop_lat && order.drop_lon ? `${order.drop_lat.toFixed(5)},${order.drop_lon.toFixed(5)}` : "-")}\n` +
-      `📏 ${order.distance_km.toFixed(2)} km\n` +
-      `💰 ${order.price_azn.toFixed(2)} AZN (nağd)\n\n` +
-      `Waze: ${waze}`,
+      `🎯 Təyinat: ${
+        order.drop_text ||
+        (order.drop_lat && order.drop_lon
+          ? `${order.drop_lat.toFixed(5)},${order.drop_lon.toFixed(5)}`
+          : "-")
+      }\n` +
+      `📏 ${Number(order.distance_km || 0).toFixed(2)} km\n` +
+      `💰 ${Number(order.price_azn || 0).toFixed(2)} AZN (nağd)\n\n` +
+      `🧭 Pickup Waze: ${pickupWaze}\n` +
+      `🧭 Drop Waze: ${dropWaze}`,
     reply_markup: {
       inline_keyboard: [
         [{ text: "✅ Qəbul et", callback_data: `accept_order:${order.id}` }],
@@ -318,7 +368,7 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
   try {
     const update = req.body;
 
-    // -------- CALLBACK QUERIES (ACCEPT/REJECT + ADMIN APPROVE) --------
+    // -------- CALLBACK QUERIES --------
     if (update.callback_query) {
       const cq = update.callback_query;
       const fromId = cq.from.id;
@@ -330,7 +380,11 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
       if (data.startsWith("lang:")) {
         const lang = data.split(":")[1];
         setUserLang(fromId, lang);
-        await tg("sendMessage", { chat_id: fromId, text: t(lang, "welcome"), reply_markup: mainKb(lang) });
+        await tg("sendMessage", {
+          chat_id: fromId,
+          text: t(lang, "welcome"),
+          reply_markup: mainKb(lang),
+        });
         return res.sendStatus(200);
       }
 
@@ -364,21 +418,18 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         const [cmd, idStr] = data.split(":");
         const orderId = Number(idStr);
 
-        // 1) order exists?
         const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
         if (!order) {
           await tg("sendMessage", { chat_id: fromId, text: "Sifariş tapılmadı." });
           return res.sendStatus(200);
         }
 
-        // 2) is driver approved+online?
         const driver = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(fromId);
         if (!driver || !driver.is_approved) {
           await tg("sendMessage", { chat_id: fromId, text: "Sürücü təsdiqli deyil." });
           return res.sendStatus(200);
         }
 
-        // 3) offer exists for this driver and still offered?
         const offer = db
           .prepare(`SELECT * FROM offers WHERE order_id=? AND driver_id=? AND status='offered'`)
           .get(orderId, fromId);
@@ -388,20 +439,12 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           return res.sendStatus(200);
         }
 
-        // 4) if already accepted by someone else
         const latest = db.prepare(`SELECT status, driver_id FROM orders WHERE id=?`).get(orderId);
-        if (latest.status === "accepted" && Number(latest.driver_id) !== Number(fromId)) {
-          db.prepare(`UPDATE offers SET status='expired', updated_at=? WHERE id=?`).run(now(), offer.id);
-          await tg("sendMessage", { chat_id: fromId, text: t("az", "orderAlreadyTaken") });
-          return res.sendStatus(200);
-        }
 
-        // 5) handle reject
         if (cmd === "reject_order") {
           db.prepare(`UPDATE offers SET status='rejected', updated_at=? WHERE id=?`).run(now(), offer.id);
           await tg("sendMessage", { chat_id: fromId, text: t("az", "driverRejected") });
 
-          // If nobody left offered -> mark no_driver and notify customer
           const left = db.prepare(`SELECT COUNT(*) c FROM offers WHERE order_id=? AND status='offered'`).get(orderId).c;
           if (!left && latest.status !== "accepted") {
             db.prepare(`UPDATE orders SET status='no_driver', updated_at=? WHERE id=?`).run(now(), orderId);
@@ -411,26 +454,21 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           return res.sendStatus(200);
         }
 
-        // 6) handle accept (ATOMIC LOCK)
-        // We lock by updating only if status == 'searching'
+        // accept (atomic lock)
         const locked = db
           .prepare(`UPDATE orders SET status='accepted', driver_id=?, updated_at=? WHERE id=? AND status='searching'`)
           .run(fromId, now(), orderId);
 
         if (locked.changes === 0) {
-          // Someone accepted first OR status changed
           db.prepare(`UPDATE offers SET status='expired', updated_at=? WHERE id=?`).run(now(), offer.id);
           await tg("sendMessage", { chat_id: fromId, text: t("az", "orderAlreadyTaken") });
           return res.sendStatus(200);
         }
 
-        // Mark this driver's offer accepted; others expired
         db.prepare(`UPDATE offers SET status='accepted', updated_at=? WHERE id=?`).run(now(), offer.id);
-        db.prepare(
-          `UPDATE offers SET status='expired', updated_at=? WHERE order_id=? AND driver_id<>? AND status='offered'`
-        ).run(now(), orderId, fromId);
+        db.prepare(`UPDATE offers SET status='expired', updated_at=? WHERE order_id=? AND driver_id<>? AND status='offered'`)
+          .run(now(), orderId, fromId);
 
-        // Notify driver + customer
         await tg("sendMessage", { chat_id: fromId, text: t("az", "driverAcceptedToDriver", orderId) });
 
         const driverFull = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(fromId);
@@ -441,14 +479,89 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           text: t(customerUser.lang || "az", "driverAcceptedToCustomer", orderId, driverFull),
         });
 
-        // Also send driver navigation link
-        const waze = `https://waze.com/ul?ll=${order.pickup_lat},${order.pickup_lon}&navigate=yes`;
+        // send pickup + status keyboard to driver
+        const pickupWaze = wazeLinkByLL(order.pickup_lat, order.pickup_lon);
+        let dropWaze = "-";
+        if (order.drop_lat && order.drop_lon) dropWaze = wazeLinkByLL(order.drop_lat, order.drop_lon);
+        else if (order.drop_text) dropWaze = wazeLinkByQuery(order.drop_text);
+
         await tg("sendMessage", {
           chat_id: fromId,
-          text: `🧭 Naviqasiya (Waze): ${waze}\n\n📍 Müştəri ünvanına get.`,
+          text: `🧭 Naviqasiya\nPickup: ${pickupWaze}\nDrop: ${dropWaze}`,
+        });
+
+        await tg("sendMessage", {
+          chat_id: fromId,
+          text: `🧩 Sifariş idarəetmə düymələri (#${orderId})`,
+          reply_markup: driverStatusKb(orderId),
         });
 
         return res.sendStatus(200);
+      }
+
+      // ---- DRIVER STATUS UPDATES: arrived/starttrip/finish/cancel ----
+      if (
+        data.startsWith("arrived:") ||
+        data.startsWith("starttrip:") ||
+        data.startsWith("finish:") ||
+        data.startsWith("cancel:")
+      ) {
+        const [cmd, idStr] = data.split(":");
+        const orderId = Number(idStr);
+        const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
+        if (!order) {
+          await tg("sendMessage", { chat_id: fromId, text: "Sifariş tapılmadı." });
+          return res.sendStatus(200);
+        }
+
+        if (Number(order.driver_id) !== Number(fromId)) {
+          await tg("sendMessage", { chat_id: fromId, text: "Bu sifariş sənə aid deyil." });
+          return res.sendStatus(200);
+        }
+
+        if (["finished", "cancelled"].includes(order.status)) {
+          await tg("sendMessage", { chat_id: fromId, text: "Bu sifariş artıq bağlanıb." });
+          return res.sendStatus(200);
+        }
+
+        const cust = getUser(order.customer_id) || { lang: "az" };
+        const custLang = cust.lang || "az";
+
+        if (cmd === "arrived") {
+          db.prepare(`UPDATE orders SET status='arrived', updated_at=? WHERE id=?`).run(now(), orderId);
+          await tg("sendMessage", { chat_id: fromId, text: `📍 “Gəldim” qeyd edildi. (#${orderId})` });
+          await tg("sendMessage", { chat_id: order.customer_id, text: t(custLang, "driverArrivedToCustomer", orderId) });
+          return res.sendStatus(200);
+        }
+
+        if (cmd === "starttrip") {
+          db.prepare(`UPDATE orders SET status='in_trip', updated_at=? WHERE id=?`).run(now(), orderId);
+
+          let dropNav = "-";
+          if (order.drop_lat && order.drop_lon) dropNav = wazeLinkByLL(order.drop_lat, order.drop_lon);
+          else if (order.drop_text) dropNav = wazeLinkByQuery(order.drop_text);
+
+          await tg("sendMessage", { chat_id: fromId, text: `▶️ Sürüş başladı. (#${orderId})\n🧭 Təyinat Waze: ${dropNav}` });
+          await tg("sendMessage", { chat_id: order.customer_id, text: t(custLang, "tripStartedToCustomer", orderId) });
+          return res.sendStatus(200);
+        }
+
+        if (cmd === "finish") {
+          db.prepare(`UPDATE orders SET status='finished', updated_at=? WHERE id=?`).run(now(), orderId);
+          await tg("sendMessage", { chat_id: fromId, text: `🏁 Sürüş bitdi. (#${orderId})` });
+          await tg("sendMessage", {
+            chat_id: order.customer_id,
+            text: t(custLang, "tripFinishedToCustomer", orderId, Number(order.price_azn || 0)),
+          });
+          return res.sendStatus(200);
+        }
+
+        if (cmd === "cancel") {
+          db.prepare(`UPDATE orders SET status='cancelled', updated_at=? WHERE id=?`).run(now(), orderId);
+          await tg("sendMessage", { chat_id: fromId, text: t("az", "orderCancelledToDriver", orderId) });
+          await tg("sendMessage", { chat_id: order.customer_id, text: t(custLang, "orderCancelledToCustomer", orderId) });
+          return res.sendStatus(200);
+        }
       }
 
       return res.sendStatus(200);
@@ -467,6 +580,23 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
       // /id
       if (text === "/id" || text === "/ID") {
         await tg("sendMessage", { chat_id: tgId, text: `Sənin Telegram ID: ${tgId}` });
+        return res.sendStatus(200);
+      }
+
+      // /start -> language choose + menu
+      if (text === "/start") {
+        await tg("sendMessage", {
+          chat_id: tgId,
+          text: t("az", "langChoose"),
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🇦🇿 AZ", callback_data: "lang:az" }],
+              [{ text: "🇬🇧 EN", callback_data: "lang:en" }],
+              [{ text: "🇷🇺 RU", callback_data: "lang:ru" }],
+            ],
+          },
+        });
+        clearSession(tgId);
         return res.sendStatus(200);
       }
 
@@ -500,20 +630,88 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // /start -> language choose + menu
-      if (text === "/start") {
+      // Admin live orders
+      if (text === "/admin_live") {
+        if (!isAdmin(tgId)) return res.sendStatus(200);
+
+        const orders = db.prepare(`SELECT * FROM orders ORDER BY created_at DESC LIMIT 20`).all();
+        if (!orders.length) {
+          await tg("sendMessage", { chat_id: tgId, text: "Sifariş yoxdur." });
+          return res.sendStatus(200);
+        }
+        for (const o of orders) {
+          await tg("sendMessage", {
+            chat_id: tgId,
+            text:
+              `#${o.id} | ${o.status}\n` +
+              `👤 customer: ${o.customer_id}\n` +
+              `🚖 driver: ${o.driver_id || "-"}\n` +
+              `📏 ${Number(o.distance_km || 0).toFixed(2)} km | 💰 ${Number(o.price_azn || 0).toFixed(2)} AZN\n` +
+              `🎯 ${o.drop_text || (o.drop_lat && o.drop_lon ? `${o.drop_lat},${o.drop_lon}` : "-")}`,
+          });
+        }
+        return res.sendStatus(200);
+      }
+
+      // Admin drivers list
+      if (text === "/admin_drivers") {
+        if (!isAdmin(tgId)) return res.sendStatus(200);
+
+        const ds = db.prepare(
+          `SELECT tg_id, full_name, phone, car, plate, is_online, last_lat, last_lon, updated_at
+           FROM drivers
+           WHERE is_approved=1
+           ORDER BY is_online DESC, updated_at DESC
+           LIMIT 50`
+        ).all();
+
+        if (!ds.length) {
+          await tg("sendMessage", { chat_id: tgId, text: "Sürücü yoxdur." });
+          return res.sendStatus(200);
+        }
+
+        let out = "🚖 Sürücülər (top 50)\n\n";
+        for (const d of ds) {
+          out += `${d.is_online ? "🟢" : "⚪"} ${d.full_name || "-"} | ${d.phone || "-"}\n`;
+          out += `ID:${d.tg_id} | ${d.car || "-"} | ${d.plate || "-"}\n\n`;
+        }
+        await tg("sendMessage", { chat_id: tgId, text: out });
+        return res.sendStatus(200);
+      }
+
+      // Admin order details
+      if (typeof text === "string" && text.startsWith("/admin_order")) {
+        if (!isAdmin(tgId)) return res.sendStatus(200);
+
+        const parts = text.trim().split(/\s+/);
+        const id = Number(parts[1]);
+        if (!id) {
+          await tg("sendMessage", { chat_id: tgId, text: "İstifadə: /admin_order 12" });
+          return res.sendStatus(200);
+        }
+
+        const o = db.prepare(`SELECT * FROM orders WHERE id=?`).get(id);
+        if (!o) {
+          await tg("sendMessage", { chat_id: tgId, text: "Sifariş tapılmadı." });
+          return res.sendStatus(200);
+        }
+
+        const pickupWaze = (o.pickup_lat && o.pickup_lon) ? wazeLinkByLL(o.pickup_lat, o.pickup_lon) : "-";
+        let dropWaze = "-";
+        if (o.drop_lat && o.drop_lon) dropWaze = wazeLinkByLL(o.drop_lat, o.drop_lon);
+        else if (o.drop_text) dropWaze = wazeLinkByQuery(o.drop_text);
+
         await tg("sendMessage", {
           chat_id: tgId,
-          text: t("az", "langChoose"),
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🇦🇿 AZ", callback_data: "lang:az" }],
-              [{ text: "🇬🇧 EN", callback_data: "lang:en" }],
-              [{ text: "🇷🇺 RU", callback_data: "lang:ru" }],
-            ],
-          },
+          text:
+            `#${o.id} | ${o.status}\n` +
+            `👤 customer: ${o.customer_id}\n` +
+            `🚖 driver: ${o.driver_id || "-"}\n` +
+            `📏 ${Number(o.distance_km || 0).toFixed(2)} km\n` +
+            `💰 ${Number(o.price_azn || 0).toFixed(2)} AZN\n` +
+            `🧭 Pickup: ${pickupWaze}\n` +
+            `🧭 Drop: ${dropWaze}`,
         });
-        clearSession(tgId);
         return res.sendStatus(200);
       }
 
@@ -525,7 +723,8 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         // update driver last location if driver exists
         const d = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(tgId);
         if (d) {
-          db.prepare(`UPDATE drivers SET last_lat=?, last_lon=?, updated_at=? WHERE tg_id=?`).run(lat, lon, now(), tgId);
+          db.prepare(`UPDATE drivers SET last_lat=?, last_lon=?, updated_at=? WHERE tg_id=?`)
+            .run(lat, lon, now(), tgId);
         }
 
         const sess = getSession(tgId);
@@ -537,7 +736,7 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           return res.sendStatus(200);
         }
 
-        // customer drop (as location)
+        // customer drop (as location) -> create order
         if (sess && sess.step === "customer_wait_drop") {
           const pickupLat = sess.tmp_pickup_lat;
           const pickupLon = sess.tmp_pickup_lon;
@@ -545,17 +744,19 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           const distanceKm = await getDistanceKm(pickupLat, pickupLon, lat, lon);
           const price = calcPrice(distanceKm);
 
-          const info = db
-            .prepare(
-              `INSERT INTO orders(customer_id, status, pickup_lat, pickup_lon, drop_lat, drop_lon, drop_text, distance_km, price_azn, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)`
-            )
-            .run(tgId, "searching", pickupLat, pickupLon, lat, lon, null, distanceKm, price, now(), now());
+          const info = db.prepare(
+            `INSERT INTO orders(customer_id, status, pickup_lat, pickup_lon, drop_lat, drop_lon, drop_text, distance_km, price_azn, created_at, updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+          ).run(tgId, "searching", pickupLat, pickupLon, lat, lon, sess.tmp_drop_text ?? null, distanceKm, price, now(), now());
 
           const orderId = info.lastInsertRowid;
           clearSession(tgId);
 
-          await tg("sendMessage", { chat_id: tgId, text: t(lang, "orderCreated", orderId, distanceKm, price), reply_markup: mainKb(lang) });
+          await tg("sendMessage", {
+            chat_id: tgId,
+            text: t(lang, "orderCreated", orderId, distanceKm, price),
+            reply_markup: mainKb(lang),
+          });
 
           // find drivers and offer
           const candidates = getCandidateDrivers(pickupLat, pickupLon, OFFER_DRIVERS);
@@ -568,13 +769,8 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
 
           for (const c of candidates) {
-            db.prepare(`INSERT INTO offers(order_id, driver_id, status, created_at, updated_at) VALUES(?,?,?,?,?)`).run(
-              orderId,
-              c.tg_id,
-              "offered",
-              now(),
-              now()
-            );
+            db.prepare(`INSERT INTO offers(order_id, driver_id, status, created_at, updated_at) VALUES(?,?,?,?,?)`)
+              .run(orderId, c.tg_id, "offered", now(), now());
             await sendDriverOffer(c.tg_id, order);
           }
 
@@ -600,9 +796,7 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
           chat_id: tgId,
           text:
             "🚖 Sürücü paneli\n\n" +
-            (d
-              ? `Təsdiq: ${d.is_approved ? "✅" : "⏳"}\nOnline: ${isOnline ? "🟢" : "⚪"}`
-              : "Sən hələ qeydiyyatdan keçməmisən."),
+            (d ? `Təsdiq: ${d.is_approved ? "✅" : "⏳"}\nOnline: ${isOnline ? "🟢" : "⚪"}` : "Sən hələ qeydiyyatdan keçməmisən."),
           reply_markup: driverKb(isOnline),
         });
         return res.sendStatus(200);
@@ -693,13 +887,10 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
 
       // customer drop as TEXT (optional)
       if (sess && sess.step === "customer_wait_drop" && typeof text === "string" && text.trim().length) {
-        // We don't have exact drop coords, but we can still create order with approx pricing by haversine? (skip)
-        // For now we store drop_text and ask user to also send location if wants exact distance.
         setSession(tgId, "customer_wait_drop", { tmp_drop_text: text.trim() });
         await tg("sendMessage", {
           chat_id: tgId,
-          text:
-            "✅ Ünvan qəbul edildi.\nİndi də təyinat lokasiyanı göndər ki, məsafə və qiymət dəqiq hesablansın.",
+          text: "✅ Ünvan qəbul edildi.\nİndi də təyinat lokasiyanı göndər ki, məsafə və qiymət dəqiq hesablansın.",
           reply_markup: locKb(),
         });
         return res.sendStatus(200);
