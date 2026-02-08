@@ -1,3 +1,18 @@
+/**
+ * PayTaksi Telegram Bot (Render)
+ * - Webhook: /tg/<WEBHOOK_SECRET>
+ * - Customer flow: pickup location -> destination location -> price calc
+ * - Driver: registration + manual admin approve + online toggle + live location
+ * - Offer: send order to nearest N online approved drivers, accept/reject with inline buttons
+ * - Languages: AZ/EN/RU (basic)
+ *
+ * ENV required:
+ *   BOT_TOKEN=xxxx
+ *   WEBHOOK_SECRET=paytaksi_bot  (must match webhook url path)
+ *   ADMIN_IDS=123456789,987654321 (optional but needed for approvals)
+ *   OFFER_DRIVERS=5 (optional)
+ */
+
 const express = require("express");
 const Database = require("better-sqlite3");
 
@@ -6,8 +21,23 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map((s) => Number(s));
+const OFFER_DRIVERS = Number(process.env.OFFER_DRIVERS || 5);
 
-// ---- Telegram helper (Node 22 built-in fetch) ----
+if (!BOT_TOKEN) {
+  console.error("❌ BOT_TOKEN is missing in environment variables");
+}
+if (!WEBHOOK_SECRET) {
+  console.error("❌ WEBHOOK_SECRET is missing in environment variables");
+}
+
+const db = new Database("paytaksi.sqlite");
+
+// -------- Telegram helper (Node 18+ has fetch) ----------
 async function tg(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -17,10 +47,13 @@ async function tg(method, body) {
   return r.json();
 }
 
-// ---- DB (SQLite file in project dir) ----
-const db = new Database("paytaksi.sqlite");
+const now = () => Math.floor(Date.now() / 1000);
 
-// schema
+function isAdmin(tgId) {
+  return ADMIN_IDS.includes(Number(tgId));
+}
+
+// -------- DB schema ----------
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   tg_id INTEGER PRIMARY KEY,
@@ -49,9 +82,20 @@ CREATE TABLE IF NOT EXISTS orders (
   status TEXT,
   pickup_lat REAL,
   pickup_lon REAL,
+  drop_lat REAL,
+  drop_lon REAL,
   drop_text TEXT,
   distance_km REAL,
   price_azn REAL,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS offers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER,
+  driver_id INTEGER,
+  status TEXT, -- offered/accepted/rejected/expired
   created_at INTEGER,
   updated_at INTEGER
 );
@@ -61,12 +105,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   step TEXT,
   tmp_pickup_lat REAL,
   tmp_pickup_lon REAL,
+  tmp_drop_lat REAL,
+  tmp_drop_lon REAL,
   tmp_drop_text TEXT,
   updated_at INTEGER
 );
 `);
-
-const now = () => Math.floor(Date.now() / 1000);
 
 function upsertUser(tgId) {
   db.prepare(
@@ -74,46 +118,60 @@ function upsertUser(tgId) {
      ON CONFLICT(tg_id) DO UPDATE SET tg_id=excluded.tg_id`
   ).run(tgId, now());
 }
-
+function getUser(tgId) {
+  return db.prepare(`SELECT * FROM users WHERE tg_id=?`).get(tgId);
+}
+function setUserLang(tgId, lang) {
+  db.prepare(
+    `INSERT INTO users(tg_id, lang, created_at) VALUES(?,?,?)
+     ON CONFLICT(tg_id) DO UPDATE SET lang=excluded.lang`
+  ).run(tgId, lang, now());
+}
 function setStep(tgId, step, extra = {}) {
   const row = db.prepare(`SELECT tg_id FROM sessions WHERE tg_id=?`).get(tgId);
   if (!row) {
     db.prepare(
-      `INSERT INTO sessions(tg_id, step, tmp_pickup_lat, tmp_pickup_lon, tmp_drop_text, updated_at)
-       VALUES(?,?,?,?,?,?)`
+      `INSERT INTO sessions(tg_id, step, tmp_pickup_lat, tmp_pickup_lon, tmp_drop_lat, tmp_drop_lon, tmp_drop_text, updated_at)
+       VALUES(?,?,?,?,?,?,?,?)`
     ).run(
       tgId,
       step,
       extra.tmp_pickup_lat ?? null,
       extra.tmp_pickup_lon ?? null,
+      extra.tmp_drop_lat ?? null,
+      extra.tmp_drop_lon ?? null,
       extra.tmp_drop_text ?? null,
       now()
     );
   } else {
     db.prepare(
-      `UPDATE sessions SET step=?, tmp_pickup_lat=COALESCE(?, tmp_pickup_lat),
-       tmp_pickup_lon=COALESCE(?, tmp_pickup_lon), tmp_drop_text=COALESCE(?, tmp_drop_text),
+      `UPDATE sessions SET step=?,
+       tmp_pickup_lat=COALESCE(?, tmp_pickup_lat),
+       tmp_pickup_lon=COALESCE(?, tmp_pickup_lon),
+       tmp_drop_lat=COALESCE(?, tmp_drop_lat),
+       tmp_drop_lon=COALESCE(?, tmp_drop_lon),
+       tmp_drop_text=COALESCE(?, tmp_drop_text),
        updated_at=? WHERE tg_id=?`
     ).run(
       step,
       extra.tmp_pickup_lat ?? null,
       extra.tmp_pickup_lon ?? null,
+      extra.tmp_drop_lat ?? null,
+      extra.tmp_drop_lon ?? null,
       extra.tmp_drop_text ?? null,
       now(),
       tgId
     );
   }
 }
-
 function getSession(tgId) {
   return db.prepare(`SELECT * FROM sessions WHERE tg_id=?`).get(tgId);
 }
-
 function clearSession(tgId) {
   db.prepare(`DELETE FROM sessions WHERE tg_id=?`).run(tgId);
 }
 
-// haversine km
+// -------- distance + pricing ----------
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -126,19 +184,115 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// price rule: 3.50 up to 3km, then 0.40 per each extra 1km (ceil)
+// Try OSRM (road distance). If fails, fallback to haversine.
+async function getDistanceKm(pLat, pLon, dLat, dLon) {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${pLon},${pLat};${dLon},${dLat}?overview=false`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4500);
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    const j = await r.json();
+    if (j?.routes?.[0]?.distance != null) {
+      return j.routes[0].distance / 1000;
+    }
+  } catch (e) {}
+  return haversineKm(pLat, pLon, dLat, dLon);
+}
+
+// Price: 3.50 up to 3 km, then +0.40 AZN per each extra 1 km (ceil).
 function calcPrice(distanceKm) {
   if (distanceKm <= 3) return 3.5;
   const extra = Math.ceil(distanceKm - 3);
   return +(3.5 + extra * 0.4).toFixed(2);
 }
 
-// main menu keyboard
-function mainKb() {
+// -------- i18n ----------
+const STR = {
+  az: {
+    welcome: "Xoş gəldin!\n\nAşağıdan seçim et:",
+    callTaxi: "🚕 Taksi çağır",
+    driverPanel: "🚖 Sürücü paneli",
+    sendPickup: "📍 Zəhmət olmasa götürülmə lokasiyanı göndər.",
+    sendDrop: "🎯 İndi təyinat lokasiyanı göndər (gedəcəyin yer).",
+    searching: "Sürücü axtarılır...",
+    created: (id, price, km) =>
+      `✅ Sifariş yaradıldı (#${id})\n📏 Məsafə: ${km.toFixed(
+        2
+      )} km\n💰 Qiymət: ${price.toFixed(2)} AZN (nağd)\n\nSürücü axtarılır...`,
+    noDriver:
+      "❌ Hal-hazırda online sürücü tapılmadı. Bir az sonra yenidən cəhd edin.",
+    driverAwaitApprove:
+      "✅ Qeydiyyat göndərildi. Admin təsdiqindən sonra Online ola biləcəksən.",
+    needRegister: "Əvvəl '📝 Qeydiyyat' edin.",
+    needApprove: "Admin təsdiqi gözlənilir.",
+    onlineAskLoc:
+      "🟢 Online oldun. Lokasiyanı göndər ki, yaxın sifarişlər gəlsin.",
+    langChoose: "Dil seç:",
+  },
+  en: {
+    welcome: "Welcome!\n\nChoose an option:",
+    callTaxi: "🚕 Call a taxi",
+    driverPanel: "🚖 Driver panel",
+    sendPickup: "📍 Please send pickup location.",
+    sendDrop: "🎯 Now send destination location.",
+    searching: "Searching for a driver...",
+    created: (id, price, km) =>
+      `✅ Order created (#${id})\n📏 Distance: ${km.toFixed(
+        2
+      )} km\n💰 Price: ${price.toFixed(2)} AZN (cash)\n\nSearching for a driver...`,
+    noDriver: "❌ No online driver found. Please try again later.",
+    driverAwaitApprove:
+      "✅ Registration sent. Wait for admin approval to go online.",
+    needRegister: "Please register first (📝 Registration).",
+    needApprove: "Waiting for admin approval.",
+    onlineAskLoc:
+      "🟢 You're online. Send your location to receive nearby orders.",
+    langChoose: "Choose language:",
+  },
+  ru: {
+    welcome: "Добро пожаловать!\n\nВыберите:",
+    callTaxi: "🚕 Вызвать такси",
+    driverPanel: "🚖 Панель водителя",
+    sendPickup: "📍 Отправьте точку подачи.",
+    sendDrop: "🎯 Теперь отправьте точку назначения.",
+    searching: "Ищем водителя...",
+    created: (id, price, km) =>
+      `✅ Заказ создан (#${id})\n📏 Дистанция: ${km.toFixed(
+        2
+      )} км\n💰 Цена: ${price.toFixed(2)} AZN (наличными)\n\nИщем водителя...`,
+    noDriver: "❌ Нет водителей онлайн. Попробуйте позже.",
+    driverAwaitApprove:
+      "✅ Регистрация отправлена. Ждите подтверждения администратора.",
+    needRegister: "Сначала пройдите регистрацию (📝).",
+    needApprove: "Ожидается подтверждение администратора.",
+    onlineAskLoc:
+      "🟢 Вы онлайн. Отправьте локацию, чтобы получать заказы рядом.",
+    langChoose: "Выберите язык:",
+  },
+};
+
+function t(lang, key, ...args) {
+  const L = STR[lang] ? lang : "az";
+  const v = STR[L][key];
+  return typeof v === "function" ? v(...args) : v;
+}
+
+function mainKb(lang) {
   return {
     keyboard: [
-      [{ text: "🚕 Taksi çağır" }],
-      [{ text: "🚖 Sürücü paneli" }],
+      [{ text: t(lang, "callTaxi") }],
+      [{ text: t(lang, "driverPanel") }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
+function requestLocationKb(backText = "⬅️ Geri") {
+  return {
+    keyboard: [
+      [{ text: "📍 Lokasiya göndər", request_location: true }],
+      [{ text: backText }],
     ],
     resize_keyboard: true,
   };
@@ -155,63 +309,44 @@ function driverKb(isOnline) {
   };
 }
 
-function requestLocationKb(backText = "⬅️ Geri") {
-  return {
-    keyboard: [
-      [{ text: "📍 Lokasiyanı göndər", request_location: true }],
-      [{ text: backText }],
-    ],
-    resize_keyboard: true,
-  };
-}
-
-// pick nearest approved+online drivers (max 10)
-function getCandidateDrivers(pLat, pLon, limit = 10) {
+// -------- drivers logic ----------
+function getCandidateDrivers(pLat, pLon, limit = OFFER_DRIVERS) {
   const rows = db
     .prepare(
       `SELECT tg_id, last_lat, last_lon
        FROM drivers
-       WHERE is_approved=1 AND is_online=1 AND last_lat IS NOT NULL AND last_lon IS NOT NULL`
+       WHERE is_approved=1 AND is_online=1
+         AND last_lat IS NOT NULL AND last_lon IS NOT NULL`
     )
     .all();
 
-  const scored = rows
+  return rows
     .map((d) => ({
       tg_id: d.tg_id,
       dist: haversineKm(pLat, pLon, d.last_lat, d.last_lon),
     }))
     .sort((a, b) => a.dist - b.dist)
     .slice(0, limit);
-
-  return scored;
 }
 
-// assign order to first driver (simple MVP). You can later make “offer window”.
-function assignOrder(orderId, pLat, pLon) {
-  const candidates = getCandidateDrivers(pLat, pLon, 10);
-  if (candidates.length === 0) return null;
-
-  const driverId = candidates[0].tg_id;
-  db.prepare(`UPDATE orders SET driver_id=?, status='offered', updated_at=? WHERE id=?`).run(
-    driverId,
-    now(),
-    orderId
-  );
-  return driverId;
-}
-
-async function sendToDriverOffer(driverId, order) {
+async function sendDriverOffer(driverId, order) {
   const waze = `https://waze.com/ul?ll=${order.pickup_lat},${order.pickup_lon}&navigate=yes`;
   await tg("sendMessage", {
     chat_id: driverId,
     text:
-      `🚕 *Yeni sifariş*\n` +
-      `📍 Götürmə: ${order.pickup_lat.toFixed(5)}, ${order.pickup_lon.toFixed(5)}\n` +
-      `🎯 Haraya: ${order.drop_text}\n` +
-      `💰 Qiymət: *${order.price_azn.toFixed(2)} AZN* (nağd)\n\n` +
-      `Waze: ${waze}\n\n` +
-      `Qəbul edirsən?`,
-    parse_mode: "Markdown",
+      `🚕 Yeni sifariş (#${order.id})\n` +
+      `📍 Götürmə: ${order.pickup_lat.toFixed(5)}, ${order.pickup_lon.toFixed(
+        5
+      )}\n` +
+      `🎯 Təyinat: ${
+        order.drop_text ||
+        (order.drop_lat != null && order.drop_lon != null
+          ? `${order.drop_lat.toFixed(5)},${order.drop_lon.toFixed(5)}`
+          : "-")
+      }\n` +
+      `📏 ${order.distance_km.toFixed(2)} km\n` +
+      `💰 ${order.price_azn.toFixed(2)} AZN (nağd)\n\n` +
+      `Waze: ${waze}`,
     reply_markup: {
       inline_keyboard: [
         [{ text: "✅ Qəbul et", callback_data: `accept:${order.id}` }],
@@ -221,200 +356,337 @@ async function sendToDriverOffer(driverId, order) {
   });
 }
 
-// ---- Routes ----
+// -------- basic routes ----------
 app.get("/", (req, res) => res.send("PayTaksi bot is running 🚕"));
+app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
 
+// 🔥 IMPORTANT: Webhook endpoint MUST match getWebhookInfo url path:
+// https://paytaksi-bot.onrender.com/tg/<WEBHOOK_SECRET>
 app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
   try {
     const update = req.body;
 
-    // callback buttons (accept/reject)
+    // ---- callback queries ----
     if (update.callback_query) {
       const cq = update.callback_query;
       const fromId = cq.from.id;
       const data = cq.data || "";
 
-      const [cmd, idStr] = data.split(":");
-      const orderId = parseInt(idStr, 10);
-
-      // ack callback
       await tg("answerCallbackQuery", { callback_query_id: cq.id });
 
-      const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
-      if (!order) {
-        await tg("sendMessage", { chat_id: fromId, text: "Sifariş tapılmadı." });
+      // language
+      if (data.startsWith("lang:")) {
+        const lang = data.split(":")[1];
+        setUserLang(fromId, lang);
+        await tg("sendMessage", {
+          chat_id: fromId,
+          text: t(lang, "welcome"),
+          reply_markup: mainKb(lang),
+        });
         return res.sendStatus(200);
       }
 
-      // only assigned driver can act in MVP
-      if (order.driver_id !== fromId) {
-        await tg("sendMessage", { chat_id: fromId, text: "Bu sifariş sənə aid deyil." });
+      // admin approve/reject driver
+      if (data.startsWith("appr:") || data.startsWith("rejdrv:")) {
+        if (!isAdmin(fromId)) {
+          await tg("sendMessage", { chat_id: fromId, text: "Admin deyil." });
+          return res.sendStatus(200);
+        }
+        const [cmd, idStr] = data.split(":");
+        const driverId = Number(idStr);
+
+        if (cmd === "appr") {
+          db.prepare(
+            `UPDATE drivers SET is_approved=1, updated_at=? WHERE tg_id=?`
+          ).run(now(), driverId);
+          await tg("sendMessage", {
+            chat_id: fromId,
+            text: `✅ Təsdiqləndi: ${driverId}`,
+          });
+          await tg("sendMessage", {
+            chat_id: driverId,
+            text: "✅ Admin səni təsdiqlədi. İndi Online ola bilərsən.",
+            reply_markup: driverKb(false),
+          });
+        } else {
+          db.prepare(
+            `UPDATE drivers SET is_approved=0, updated_at=? WHERE tg_id=?`
+          ).run(now(), driverId);
+          await tg("sendMessage", {
+            chat_id: fromId,
+            text: `❌ Rədd edildi: ${driverId}`,
+          });
+          await tg("sendMessage", {
+            chat_id: driverId,
+            text: "❌ Admin qeydiyyatı rədd etdi.",
+          });
+        }
         return res.sendStatus(200);
       }
 
-      if (cmd === "accept") {
-        // lock
-        db.prepare(`UPDATE orders SET status='accepted', updated_at=? WHERE id=?`).run(now(), orderId);
+      // order accept/reject
+      if (data.startsWith("accept:") || data.startsWith("reject:")) {
+        const [cmd, idStr] = data.split(":");
+        const orderId = Number(idStr);
 
-        await tg("sendMessage", { chat_id: fromId, text: "✅ Sifarişi qəbul etdin." });
-        await tg("sendMessage", {
-          chat_id: order.customer_id,
-          text: `✅ Sürücü tapıldı!\nSifariş #${order.id}\nSürücü yola çıxır.`,
-        });
-      }
+        const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
+        if (!order) {
+          await tg("sendMessage", { chat_id: fromId, text: "Sifariş tapılmadı." });
+          return res.sendStatus(200);
+        }
 
-      if (cmd === "reject") {
-        db.prepare(`UPDATE orders SET status='rejected', updated_at=? WHERE id=?`).run(now(), orderId);
-        await tg("sendMessage", { chat_id: fromId, text: "❌ Sifarişi rədd etdin." });
-        await tg("sendMessage", {
-          chat_id: order.customer_id,
-          text: `❌ Sürücü sifarişi qəbul etmədi.\nYenidən axtarırıq...`,
-        });
-        // try re-assign to next closest (MVP: just try again excluding this driver)
-        // simplest: turn driver offline temporarily (optional). Here: do nothing and tell customer to retry.
-        await tg("sendMessage", {
-          chat_id: order.customer_id,
-          text: "Zəhmət olmasa yenidən '🚕 Taksi çağır' edin.",
-          reply_markup: mainKb(),
-        });
+        const offer = db
+          .prepare(
+            `SELECT * FROM offers WHERE order_id=? AND driver_id=? AND status='offered'`
+          )
+          .get(orderId, fromId);
+
+        if (!offer) {
+          await tg("sendMessage", {
+            chat_id: fromId,
+            text: "Bu sifariş sənə aid deyil və ya artıq bağlanıb.",
+          });
+          return res.sendStatus(200);
+        }
+
+        const latest = db
+          .prepare(`SELECT status, driver_id FROM orders WHERE id=?`)
+          .get(orderId);
+
+        if (latest.status === "accepted") {
+          db.prepare(`UPDATE offers SET status='expired', updated_at=? WHERE id=?`)
+            .run(now(), offer.id);
+          await tg("sendMessage", {
+            chat_id: fromId,
+            text: "Sifariş artıq başqa sürücü tərəfindən götürüldü.",
+          });
+          return res.sendStatus(200);
+        }
+
+        if (cmd === "accept") {
+          db.prepare(
+            `UPDATE orders SET status='accepted', driver_id=?, updated_at=? WHERE id=?`
+          ).run(fromId, now(), orderId);
+
+          db.prepare(`UPDATE offers SET status='accepted', updated_at=? WHERE id=?`)
+            .run(now(), offer.id);
+
+          db.prepare(
+            `UPDATE offers SET status='expired', updated_at=? WHERE order_id=? AND driver_id<>? AND status='offered'`
+          ).run(now(), orderId, fromId);
+
+          await tg("sendMessage", { chat_id: fromId, text: "✅ Sifarişi qəbul etdin." });
+          await tg("sendMessage", {
+            chat_id: order.customer_id,
+            text: `✅ Sürücü tapıldı!\nSifariş #${orderId}\nSürücü yola çıxır.`,
+          });
+        } else {
+          db.prepare(`UPDATE offers SET status='rejected', updated_at=? WHERE id=?`)
+            .run(now(), offer.id);
+
+          await tg("sendMessage", { chat_id: fromId, text: "❌ Sifarişi rədd etdin." });
+
+          const still = db
+            .prepare(`SELECT COUNT(*) c FROM offers WHERE order_id=? AND status='offered'`)
+            .get(orderId).c;
+
+          if (!still) {
+            db.prepare(`UPDATE orders SET status='no_driver', updated_at=? WHERE id=?`)
+              .run(now(), orderId);
+
+            const u = getUser(order.customer_id) || { lang: "az" };
+            await tg("sendMessage", {
+              chat_id: order.customer_id,
+              text: t(u.lang, "noDriver"),
+            });
+          }
+        }
+
+        return res.sendStatus(200);
       }
 
       return res.sendStatus(200);
     }
 
-    // normal messages
+    // ---- message updates ----
     if (update.message) {
       const m = update.message;
       const tgId = m.from.id;
       upsertUser(tgId);
 
+      const user = getUser(tgId) || { lang: "az" };
+      const lang = user.lang || "az";
       const text = m.text;
 
-      // location update (driver or customer)
+      // helper: get user id
+      if (text === "/id") {
+        await tg("sendMessage", { chat_id: tgId, text: `Sənin Telegram ID: ${tgId}` });
+        return res.sendStatus(200);
+      }
+
+      // admin list pending drivers
+      if (text === "/admin") {
+        if (!isAdmin(tgId)) {
+          await tg("sendMessage", { chat_id: tgId, text: "Admin deyil." });
+          return res.sendStatus(200);
+        }
+        const pend = db
+          .prepare(
+            `SELECT * FROM drivers
+             WHERE is_approved=0 AND full_name IS NOT NULL
+             ORDER BY updated_at DESC LIMIT 20`
+          )
+          .all();
+
+        if (!pend.length) {
+          await tg("sendMessage", { chat_id: tgId, text: "Pending sürücü yoxdur." });
+          return res.sendStatus(200);
+        }
+
+        await tg("sendMessage", { chat_id: tgId, text: "⏳ Pending sürücülər:" });
+        for (const d of pend) {
+          await tg("sendMessage", {
+            chat_id: tgId,
+            text: `👨‍✈️ ${d.full_name}\n📞 ${d.phone}\n🚗 ${d.car}\n🔢 ${d.plate}\nID: ${d.tg_id}`,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "✅ Təsdiq et", callback_data: `appr:${d.tg_id}` }],
+                [{ text: "❌ Rədd et", callback_data: `rejdrv:${d.tg_id}` }],
+              ],
+            },
+          });
+        }
+        return res.sendStatus(200);
+      }
+
+      // /start => language chooser + menu
+      if (text === "/start") {
+        await tg("sendMessage", {
+          chat_id: tgId,
+          text: STR.az.langChoose,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🇦🇿 AZ", callback_data: "lang:az" }],
+              [{ text: "🇬🇧 EN", callback_data: "lang:en" }],
+              [{ text: "🇷🇺 RU", callback_data: "lang:ru" }],
+            ],
+          },
+        });
+        clearSession(tgId);
+        return res.sendStatus(200);
+      }
+
+      // location messages
       if (m.location) {
         const lat = m.location.latitude;
         const lon = m.location.longitude;
-
         const sess = getSession(tgId);
-        const isDriver = db.prepare(`SELECT 1 FROM drivers WHERE tg_id=?`).get(tgId);
 
-        // if in customer flow: waiting pickup
+        // customer pickup
         if (sess && sess.step === "customer_wait_pickup") {
           setStep(tgId, "customer_wait_drop", {
             tmp_pickup_lat: lat,
             tmp_pickup_lon: lon,
           });
+          await tg("sendMessage", {
+            chat_id: tgId,
+            text: t(lang, "sendDrop"),
+            reply_markup: requestLocationKb(),
+          });
+          return res.sendStatus(200);
+        }
+
+        // customer drop (destination)
+        if (sess && sess.step === "customer_wait_drop") {
+          setStep(tgId, "customer_done", {
+            tmp_drop_lat: lat,
+            tmp_drop_lon: lon,
+          });
+
+          const pickupLat = sess.tmp_pickup_lat;
+          const pickupLon = sess.tmp_pickup_lon;
+
+          const distanceKm = await getDistanceKm(pickupLat, pickupLon, lat, lon);
+          const price = calcPrice(distanceKm);
+
+          const info = db
+            .prepare(
+              `INSERT INTO orders(customer_id, status, pickup_lat, pickup_lon, drop_lat, drop_lon, drop_text, distance_km, price_azn, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+            )
+            .run(
+              tgId,
+              "searching",
+              pickupLat,
+              pickupLon,
+              lat,
+              lon,
+              null,
+              distanceKm,
+              price,
+              now(),
+              now()
+            );
+
+          const orderId = info.lastInsertRowid;
+          clearSession(tgId);
 
           await tg("sendMessage", {
             chat_id: tgId,
-            text: "🎯 Haraya gedirsən? Ünvanı yaz (mətn).",
-            reply_markup: { remove_keyboard: true },
+            text: t(lang, "created", orderId, price, distanceKm),
+            reply_markup: mainKb(lang),
           });
+
+          const candidates = getCandidateDrivers(pickupLat, pickupLon, OFFER_DRIVERS);
+          if (!candidates.length) {
+            db.prepare(`UPDATE orders SET status='no_driver', updated_at=? WHERE id=?`)
+              .run(now(), orderId);
+            await tg("sendMessage", { chat_id: tgId, text: t(lang, "noDriver") });
+            return res.sendStatus(200);
+          }
+
+          const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
+
+          for (const c of candidates) {
+            db.prepare(
+              `INSERT INTO offers(order_id, driver_id, status, created_at, updated_at)
+               VALUES(?,?,?,?,?)`
+            ).run(orderId, c.tg_id, "offered", now(), now());
+
+            await sendDriverOffer(c.tg_id, order);
+          }
+
+          await tg("sendMessage", {
+            chat_id: tgId,
+            text: "📨 Sifariş sürücülərə göndərildi. Cavab gözlənilir...",
+          });
+
           return res.sendStatus(200);
         }
 
         // driver location store (if driver exists)
-        if (isDriver) {
-          db.prepare(
-            `UPDATE drivers SET last_lat=?, last_lon=?, updated_at=? WHERE tg_id=?`
-          ).run(lat, lon, now(), tgId);
-          // no spam
-          return res.sendStatus(200);
+        const d = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(tgId);
+        if (d) {
+          db.prepare(`UPDATE drivers SET last_lat=?, last_lon=?, updated_at=? WHERE tg_id=?`)
+            .run(lat, lon, now(), tgId);
         }
 
-        // otherwise ignore
         return res.sendStatus(200);
       }
 
-      // /start
-      if (text === "/start") {
-        await tg("sendMessage", {
-          chat_id: tgId,
-          text: "🚕 PayTaksi\n\nXoş gəldin! Aşağıdan seçim et:",
-          reply_markup: mainKb(),
-        });
-        clearSession(tgId);
-        return res.sendStatus(200);
-      }
-
-      // back
-      if (text === "⬅️ Geri") {
-        await tg("sendMessage", {
-          chat_id: tgId,
-          text: "Əsas menyu:",
-          reply_markup: mainKb(),
-        });
-        clearSession(tgId);
-        return res.sendStatus(200);
-      }
-
-      // CUSTOMER: start order
-      if (text === "🚕 Taksi çağır") {
+      // Customer: Call taxi
+      if (text === t(lang, "callTaxi") || text === "🚕 Taksi çağır") {
         setStep(tgId, "customer_wait_pickup");
         await tg("sendMessage", {
           chat_id: tgId,
-          text: "📍 Zəhmət olmasa götürülmə lokasiyanı göndər..",
-          reply_markup: requestLocationKb("⬅️ Geri"),
+          text: t(lang, "sendPickup"),
+          reply_markup: requestLocationKb(),
         });
         return res.sendStatus(200);
       }
 
-      // CUSTOMER: receive drop text
-      const sess = getSession(tgId);
-      if (sess && sess.step === "customer_wait_drop" && typeof text === "string" && text.length > 2) {
-        // Create order (distance: MVP unknown without routing; for now use 3km base, later add routing)
-        const pickupLat = sess.tmp_pickup_lat;
-        const pickupLon = sess.tmp_pickup_lon;
-        const dropText = text.trim();
-
-        // MVP: distance estimate placeholder = 3km
-        const distanceKm = 3.0;
-        const price = calcPrice(distanceKm);
-
-        const info = db
-          .prepare(
-            `INSERT INTO orders(customer_id, status, pickup_lat, pickup_lon, drop_text, distance_km, price_azn, created_at, updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?)`
-          )
-          .run(tgId, "searching", pickupLat, pickupLon, dropText, distanceKm, price, now(), now());
-
-        const orderId = info.lastInsertRowid;
-
-        clearSession(tgId);
-
-        await tg("sendMessage", {
-          chat_id: tgId,
-          text:
-            `✅ Sifariş yaradıldı (#${orderId})\n` +
-            `💰 Təxmini qiymət: ${price.toFixed(2)} AZN (nağd)\n` +
-            `Sürücü axtarılır...`,
-          reply_markup: mainKb(),
-        });
-
-        const driverId = assignOrder(orderId, pickupLat, pickupLon);
-
-        if (!driverId) {
-          db.prepare(`UPDATE orders SET status='no_driver', updated_at=? WHERE id=?`).run(now(), orderId);
-          await tg("sendMessage", {
-            chat_id: tgId,
-            text: "❌ Hal-hazırda online sürücü tapılmadı. Bir az sonra yenidən cəhd edin.",
-          });
-          return res.sendStatus(200);
-        }
-
-        const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
-        await sendToDriverOffer(driverId, order);
-
-        await tg("sendMessage", {
-          chat_id: tgId,
-          text: "📨 Sifariş sürücüyə göndərildi. Cavab gözlənilir...",
-        });
-
-        return res.sendStatus(200);
-      }
-
-      // DRIVER panel
-      if (text === "🚖 Sürücü paneli") {
+      // Driver panel
+      if (text === t(lang, "driverPanel") || text === "🚖 Sürücü paneli") {
         const d = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(tgId);
         const isOnline = d ? !!d.is_online : false;
 
@@ -425,18 +697,17 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
             (d
               ? `Status: ${d.is_approved ? "✅ Təsdiqli" : "⏳ Təsdiq gözləyir"}\n`
               : "Sən hələ sürücü kimi qeydiyyatdan keçməmisən.\n") +
-            `Online: ${isOnline ? "🟢" : "⚪"}\n\n` +
-            "Seçim et:",
+            `Online: ${isOnline ? "🟢" : "⚪"}\n\nSeçim et:`,
           reply_markup: driverKb(isOnline),
         });
         return res.sendStatus(200);
       }
 
-      // DRIVER: registration
+      // Driver registration start
       if (text === "📝 Qeydiyyat") {
-        // create driver row if not exists
         db.prepare(
-          `INSERT INTO drivers(tg_id, is_approved, is_online, updated_at) VALUES(?,?,?,?)
+          `INSERT INTO drivers(tg_id, is_approved, is_online, updated_at)
+           VALUES(?,?,?,?)
            ON CONFLICT(tg_id) DO UPDATE SET tg_id=excluded.tg_id`
         ).run(tgId, 0, 0, now());
 
@@ -449,27 +720,27 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // DRIVER: online/offline toggle
+      // Driver online/offline toggle
       if (text === "🟢 Online" || text === "⚪ Offline") {
         const d = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(tgId);
         if (!d) {
-          await tg("sendMessage", { chat_id: tgId, text: "Əvvəl '📝 Qeydiyyat' edin." });
+          await tg("sendMessage", { chat_id: tgId, text: t(lang, "needRegister") });
           return res.sendStatus(200);
         }
         if (!d.is_approved) {
-          await tg("sendMessage", { chat_id: tgId, text: "Admin təsdiqi gözlənilir." });
+          await tg("sendMessage", { chat_id: tgId, text: t(lang, "needApprove") });
           return res.sendStatus(200);
         }
 
         const newState = d.is_online ? 0 : 1;
-        db.prepare(`UPDATE drivers SET is_online=?, updated_at=? WHERE tg_id=?`).run(newState, now(), tgId);
+        db.prepare(`UPDATE drivers SET is_online=?, updated_at=? WHERE tg_id=?`)
+          .run(newState, now(), tgId);
 
-        // request location once when going online
         if (newState === 1) {
           await tg("sendMessage", {
             chat_id: tgId,
-            text: "🟢 Online oldun. Lokasiyanı göndər ki, yaxın sifarişlər gəlsin.",
-            reply_markup: requestLocationKb("⬅️ Geri"),
+            text: t(lang, "onlineAskLoc"),
+            reply_markup: requestLocationKb(),
           });
         } else {
           await tg("sendMessage", {
@@ -481,55 +752,95 @@ app.post(`/tg/${WEBHOOK_SECRET}`, async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // DRIVER registration steps
+      // Driver registration steps
+      const sess = getSession(tgId);
+
       if (sess && sess.step === "driver_reg_name" && typeof text === "string") {
-        db.prepare(`UPDATE drivers SET full_name=?, updated_at=? WHERE tg_id=?`).run(text.trim(), now(), tgId);
+        db.prepare(`UPDATE drivers SET full_name=?, updated_at=? WHERE tg_id=?`)
+          .run(text.trim(), now(), tgId);
         setStep(tgId, "driver_reg_phone");
         await tg("sendMessage", { chat_id: tgId, text: "Telefon nömrəni yaz:" });
         return res.sendStatus(200);
       }
+
       if (sess && sess.step === "driver_reg_phone" && typeof text === "string") {
-        db.prepare(`UPDATE drivers SET phone=?, updated_at=? WHERE tg_id=?`).run(text.trim(), now(), tgId);
+        db.prepare(`UPDATE drivers SET phone=?, updated_at=? WHERE tg_id=?`)
+          .run(text.trim(), now(), tgId);
         setStep(tgId, "driver_reg_car");
-        await tg("sendMessage", { chat_id: tgId, text: "Maşın (məs: Prius 2016) yaz:" });
+        await tg("sendMessage", {
+          chat_id: tgId,
+          text: "Maşın (məs: Prius 2016) yaz:",
+        });
         return res.sendStatus(200);
       }
+
       if (sess && sess.step === "driver_reg_car" && typeof text === "string") {
-        db.prepare(`UPDATE drivers SET car=?, updated_at=? WHERE tg_id=?`).run(text.trim(), now(), tgId);
+        db.prepare(`UPDATE drivers SET car=?, updated_at=? WHERE tg_id=?`)
+          .run(text.trim(), now(), tgId);
         setStep(tgId, "driver_reg_plate");
         await tg("sendMessage", { chat_id: tgId, text: "Dövlət nömrəsi yaz:" });
         return res.sendStatus(200);
       }
+
       if (sess && sess.step === "driver_reg_plate" && typeof text === "string") {
-        db.prepare(`UPDATE drivers SET plate=?, is_online=0, updated_at=? WHERE tg_id=?`).run(
-          text.trim(),
-          now(),
-          tgId
-        );
+        db.prepare(
+          `UPDATE drivers SET plate=?, is_online=0, updated_at=? WHERE tg_id=?`
+        ).run(text.trim(), now(), tgId);
+
         clearSession(tgId);
 
         await tg("sendMessage", {
           chat_id: tgId,
-          text: "✅ Qeydiyyat göndərildi. Admin təsdiq edəndən sonra Online ola biləcəksən.",
+          text: t(lang, "driverAwaitApprove"),
           reply_markup: driverKb(false),
         });
 
-        // (MVP) Admin approval later: for now you approve via DB/manual
+        // Notify admins with approve buttons
+        const d = db.prepare(`SELECT * FROM drivers WHERE tg_id=?`).get(tgId);
+        if (ADMIN_IDS.length) {
+          for (const adminId of ADMIN_IDS) {
+            await tg("sendMessage", {
+              chat_id: adminId,
+              text:
+                `⏳ Yeni sürücü qeydiyyatı\n` +
+                `👨‍✈️ ${d.full_name}\n📞 ${d.phone}\n🚗 ${d.car}\n🔢 ${d.plate}\nID: ${d.tg_id}`,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "✅ Təsdiq et", callback_data: `appr:${d.tg_id}` }],
+                  [{ text: "❌ Rədd et", callback_data: `rejdrv:${d.tg_id}` }],
+                ],
+              },
+            });
+          }
+        }
+
         return res.sendStatus(200);
       }
 
-      // default
-      // keep quiet to avoid spam
+      // Fallback: show menu (optional)
+      if (typeof text === "string" && text.trim().length) {
+        // If user types random text, just re-show menu
+        await tg("sendMessage", { chat_id: tgId, text: t(lang, "welcome"), reply_markup: mainKb(lang) });
+      }
     }
 
-    res.sendStatus(200);
+    return res.sendStatus(200);
   } catch (e) {
-    console.error(e);
-    res.sendStatus(200);
+    console.error("Webhook error:", e);
+    return res.sendStatus(200);
   }
 });
 
-app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
+// Helpful: show webhook path for debug
+app.get("/debug", (req, res) => {
+  res.json({
+    ok: true,
+    webhook_path: `/tg/${WEBHOOK_SECRET}`,
+    has_token: !!BOT_TOKEN,
+    admins: ADMIN_IDS,
+    offer_drivers: OFFER_DRIVERS,
+  });
+});
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Server running on port", PORT));
