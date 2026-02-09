@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi - Admin</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+  <script src="https://telegram.org/js/telegram-webapp.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="brand"><div class="logo">PT</div><div><div class="title">Admin Panel</div><div class="subtitle">PayTaksi</div></div></div>
+      <a class="ghost" href="/">Geri</a>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 10px">Statistika</h2>
+      <div class="grid" id="stats"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 10px">Qiymətlər (AZN)</h2>
+      <div class="row">
+        <div>
+          <div class="muted">Start</div>
+          <input id="baseFare" class="input" type="number" step="0.01" />
+        </div>
+        <div>
+          <div class="muted">1 km</div>
+          <input id="perKm" class="input" type="number" step="0.01" />
+        </div>
+        <div>
+          <div class="muted">1 dəq</div>
+          <input id="perMin" class="input" type="number" step="0.01" />
+        </div>
+      </div>
+      <div style="height:10px"></div>
+      <button class="btn" id="savePricing">Yadda saxla</button>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 10px">Sürücülər</h2>
+      <div class="list" id="drivers"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 10px">Sifarişlər</h2>
+      <div class="list" id="rides"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { api, toast } from '/assets/app.js';
+
+    const statsEl = document.getElementById('stats');
+    const driversEl = document.getElementById('drivers');
+    const ridesEl = document.getElementById('rides');
+
+    function statTile(title, value){
+      const d = document.createElement('div');
+      d.className='tile';
+      d.innerHTML = `<div class="tileTitle">${title}</div><div class="tileText" style="font-size:22px;color:#fff;margin-top:6px">${value}</div>`;
+      return d;
+    }
+
+    async function refresh(){
+      const st = await api('/admin/stats');
+      statsEl.innerHTML='';
+      statsEl.appendChild(statTile('İstifadəçi', st.users));
+      statsEl.appendChild(statTile('Sürücü', st.drivers));
+      statsEl.appendChild(statTile('Aktiv sürücü', st.onlineDrivers));
+      statsEl.appendChild(statTile('Sifariş', st.rides));
+
+      const settings = await api('/admin/settings');
+      baseFare.value = settings.baseFare;
+      perKm.value = settings.perKm;
+      perMin.value = settings.perMin;
+
+      const drv = await api('/admin/drivers');
+      driversEl.innerHTML='';
+      if(!drv.items.length) driversEl.innerHTML='<div class="muted">Sürücü yoxdur</div>';
+      for(const u of drv.items){
+        const row = document.createElement('div');
+        row.className='item';
+        row.innerHTML = `<div style="flex:1"><div style="font-weight:700">${u.name || 'Sürücü'}</div><div class="muted">@${u.username || '-'} • ${u.online?'<span style="color:#27ae60">Online</span>':'Offline'} • reytinq: ${u.rating?.toFixed?.(2) ?? '5.00'}</div></div>`;
+        driversEl.appendChild(row);
+      }
+
+      const r = await api('/admin/rides');
+      ridesEl.innerHTML='';
+      if(!r.items.length) ridesEl.innerHTML='<div class="muted">Sifariş yoxdur</div>';
+      for(const x of r.items){
+        const row = document.createElement('div');
+        row.className='item';
+        row.innerHTML = `<div style="flex:1"><div style="font-weight:700">#${x.id} • ${x.status}</div><div class="muted">${x.pickup?.label || ''} → ${x.dropoff?.label || ''}</div><div class="muted">Sərnişin: ${x.passengerName || x.passengerId} • Sürücü: ${x.driverName || x.driverId || '-'}</div></div><div style="text-align:right"><div style="font-weight:800">${x.price} AZN</div></div>`;
+        ridesEl.appendChild(row);
+      }
+    }
+
+    document.getElementById('savePricing').onclick = async () => {
+      try{
+        await api('/admin/settings', {method:'POST', body:{
+          baseFare: Number(baseFare.value),
+          perKm: Number(perKm.value),
+          perMin: Number(perMin.value)
+        }});
+        toast('Yadda saxlandı');
+        await refresh();
+      }catch(e){toast(e.message)}
+    }
+
+    refresh().catch(e=>toast(e.message));
+    setInterval(()=>refresh().catch(()=>{}), 6000);
+  </script>
+</body>
+</html>
