@@ -11,16 +11,17 @@ export function buildBot() {
 
   bot.start(async (ctx) => {
     const isAdmin = CONFIG.ADMIN_IDS.includes(ctx.from?.id);
-    await ctx.reply(
-      "🚕 PayTaksi — mini app.
+await ctx.reply(
+  `🚕 PayTaksi — mini app.
 
-Seçim edin:",
-      Markup.inlineKeyboard([
-        [Markup.button.webApp("🧍‍♂️ Sərnişin tətbiqi", passengerUrl)],
-        [Markup.button.webApp("🚗 Sürücü tətbiqi", driverUrl)],
-        ...(isAdmin ? [[Markup.button.webApp("🛠 Admin panel", adminUrl)]] : []),
-      ])
-    );
+Seçim edin:`,
+  Markup.inlineKeyboard([
+    [Markup.button.webApp("🧍‍♂️ Sərnişin tətbiqi", passengerUrl)],
+    [Markup.button.webApp("🚗 Sürücü tətbiqi", driverUrl)],
+    ...(isAdmin ? [[Markup.button.webApp("🛠 Admin panel", adminUrl)]] : []),
+  ])
+);
+
   });
 
   bot.command("passenger", (ctx) => ctx.reply("Sərnişin tətbiqi:", Markup.inlineKeyboard([
