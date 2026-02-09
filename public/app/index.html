@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>PayTaksi</title>
+  <meta name="theme-color" content="#111827" />
+  <link rel="manifest" href="/static/app/manifest.webmanifest" />
+
+  <!-- Telegram WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Socket.IO client (served by server) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <link rel="stylesheet" href="/static/app/styles.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <audio id="ring" src="/static/app/ring.wav" preload="auto"></audio>
+  <script type="module" src="/static/app/main.js"></script>
+</body>
+</html>

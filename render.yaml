@@ -4,10 +4,20 @@ services:
     env: node
     plan: free
     buildCommand: npm install
-    startCommand: npm start
-    autoDeploy: true
+    startCommand: npm run migrate && npm start
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: NODE_VERSION
+        value: 20
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        value: "1326729201"
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: WEBHOOK_SECRET
-        value: paytaksi_bot
+        value: "paytaksi_bot"
+      - key: JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+    autoDeploy: true
