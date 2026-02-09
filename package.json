@@ -1,0 +1,25 @@
+{
+  "name": "paytaksi-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PayTaksi Telegram Mini App + Bot + Admin panel (Passenger/Driver/Admin separate PWA)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "NODE_ENV=development node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "socket.io": "^4.7.5",
+    "telegraf": "^4.16.3",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>PayTaksi — Sürücü</title>
+  <link rel="manifest" href="/manifest-driver.json"/>
+  <link rel="stylesheet" href="/css/app.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="container" id="app"></div>
+
+  <audio id="ringtone" preload="auto">
+    <source src="/ringtone.wav" type="audio/wav"/>
+  </audio>
+
+  <script type="module" src="/d/driver.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+  </script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</body>
+</html>
