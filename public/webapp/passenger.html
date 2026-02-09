@@ -1,257 +1,64 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="az">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PayTaksi - Sərnişin</title>
-  <link rel="stylesheet" href="/assets/app.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>PayTaksi – Sərnişin</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://telegram.org/js/telegram-webapp.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="./app.css" />
 </head>
 <body>
-  <div class="container">
-    <div class="topbar">
-      <div class="brand">
-        <a class="logo" href="/">PT</a>
-        <div>
-          <div class="title">Sərnişin</div>
-          <div class="subtitle" id="who">...</div>
-        </div>
-      </div>
-      <button class="ghost" id="closeBtn">Bağla</button>
-    </div>
-
-    <div class="card">
-      <div class="row">
-        <div style="flex:1">
-          <label class="lbl">Götürülmə ünvanı</label>
-          <input class="inp" id="pickup" placeholder="Məs: 28 May metro" autocomplete="off" />
-          <div class="suggest" id="pickupSug"></div>
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <div style="flex:1">
-          <label class="lbl">Gediləcək ünvan</label>
-          <input class="inp" id="dropoff" placeholder="Məs: Gənclik Mall" autocomplete="off" />
-          <div class="suggest" id="dropoffSug"></div>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:12px;gap:10px">
-        <button class="btn" id="btnMyLoc">📍 Mənim yerim</button>
-        <button class="btn pri" id="btnRequest" style="flex:1">🚕 Taksi çağır</button>
-      </div>
-
-      <div class="muted" id="estimate" style="margin-top:10px"></div>
-    </div>
-
-    <div class="card" style="padding:0">
-      <div id="map" style="height:420px;border-radius:16px"></div>
-      <div class="muted" style="padding:12px 14px">Xəritəyə toxun: pickup və dropoff nöqtələrini seç.</div>
-    </div>
-
-    <div class="card" id="rideCard" style="display:none">
-      <h3 style="margin:0 0 10px">Sifariş Statusu</h3>
-      <div id="rideText" class="muted"></div>
-      <div class="row" style="margin-top:10px">
-        <button class="btn danger" id="btnCancel">Ləğv et</button>
-      </div>
+  <div class="header">
+    <div class="logo">PT</div>
+    <div>
+      <div class="title">Sərnişin</div>
+      <div class="badge">Pickup & Dropoff seç, taksi çağır</div>
     </div>
   </div>
 
-  <script type="module">
-    import { api, toast } from '/assets/app.js';
+  <div class="container">
+    <div class="card">
+      <div class="label">Götürülmə ünvanı</div>
+      <div class="suggestions">
+        <input id="pickup" class="input" placeholder="Məs: Nərimanov, Gənclik..." autocomplete="off"/>
+        <div id="pickupSuggest" class="suggestBox" style="display:none"></div>
+      </div>
 
-    const tg = window.Telegram?.WebApp;
-    if (tg) { tg.ready(); tg.expand(); }
-    document.getElementById('closeBtn').onclick = () => tg?.close?.();
+      <div class="label">Gediləcək ünvan</div>
+      <div class="suggestions">
+        <input id="dropoff" class="input" placeholder="Məs: 28 May, İçərişəhər..." autocomplete="off"/>
+        <div id="dropoffSuggest" class="suggestBox" style="display:none"></div>
+      </div>
 
-    const who = document.getElementById('who');
-    const pickupInp = document.getElementById('pickup');
-    const dropInp = document.getElementById('dropoff');
-    const pickupSug = document.getElementById('pickupSug');
-    const dropSug = document.getElementById('dropoffSug');
-    const estimate = document.getElementById('estimate');
+      <div class="label">Qeyd (istəyə bağlı)</div>
+      <input id="note" class="input" placeholder="Məs: blok, giriş, qapı..." />
 
-    let me = null;
-    let pickup = null; // {lat, lon, title}
-    let dropoff = null;
-    let rideId = null;
+      <div class="row" style="margin-top:10px">
+        <div class="col"><button id="btn_loc" class="btn">📍 Mənim yerim</button></div>
+        <div class="col"><button id="btn_order" class="btn primary">🚕 Taksi çağır</button></div>
+      </div>
 
-    // Map
-    const map = L.map('map', { zoomControl: false }).setView([40.4093, 49.8671], 12);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
+      <div class="hr"></div>
+      <div class="kv"><span>Pickup</span><b id="st_pickup">-</b></div>
+      <div class="kv"><span>Dropoff</span><b id="st_dropoff">-</b></div>
 
-    const mkPickup = L.marker([0,0], { draggable:true });
-    const mkDrop = L.marker([0,0], { draggable:true });
+      <div class="hr"></div>
+      <div class="kv"><span>Sifariş ID</span><b id="order_id">-</b></div>
+      <div class="kv"><span>Status</span><b id="order_state">-</b></div>
+      <div class="kv"><span>Sürücü</span><b id="driver_name">-</b></div>
+      <div class="small" style="margin-top:10px">Xəritəyə toxun: pickup və dropoff nöqtələrini seç.</div>
+    </div>
 
-    function setMarker(which, p) {
-      if (!p) return;
-      const ll = [p.lat, p.lon];
-      if (which === 'pickup') {
-        mkPickup.setLatLng(ll);
-        if (!map.hasLayer(mkPickup)) mkPickup.addTo(map);
-        mkPickup.bindPopup('Götürülmə').openPopup();
-      } else {
-        mkDrop.setLatLng(ll);
-        if (!map.hasLayer(mkDrop)) mkDrop.addTo(map);
-        mkDrop.bindPopup('Gediləcək');
-      }
-      map.panTo(ll);
-      refreshEstimate();
-    }
+    <div class="mapWrap">
+      <div id="map"></div>
+    </div>
+  </div>
 
-    mkPickup.on('dragend', async () => {
-      const ll = mkPickup.getLatLng();
-      pickup = { lat: ll.lat, lon: ll.lng, title: 'Götürülmə nöqtəsi' };
-      pickupInp.value = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`;
-      refreshEstimate();
-    });
-    mkDrop.on('dragend', async () => {
-      const ll = mkDrop.getLatLng();
-      dropoff = { lat: ll.lat, lon: ll.lng, title: 'Gediləcək nöqtə' };
-      dropInp.value = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`;
-      refreshEstimate();
-    });
+  <div id="toast" class="toast"></div>
 
-    map.on('click', (e) => {
-      const p = { lat: e.latlng.lat, lon: e.latlng.lng, title: 'Seçilmiş nöqtə' };
-      if (!pickup) {
-        pickup = p; pickupInp.value = `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
-        setMarker('pickup', pickup);
-        toast('Pickup seçildi');
-      } else {
-        dropoff = p; dropInp.value = `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
-        setMarker('dropoff', dropoff);
-        toast('Dropoff seçildi');
-      }
-    });
-
-    async function search(q) {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`;
-      const res = await fetch(url, { headers: { 'Accept':'application/json' } });
-      return await res.json();
-    }
-
-    function showSug(el, list, onPick) {
-      el.innerHTML = '';
-      if (!list?.length) { el.style.display='none'; return; }
-      for (const it of list) {
-        const d = document.createElement('div');
-        d.className = 'sugItem';
-        d.textContent = it.display_name;
-        d.onclick = () => onPick(it);
-        el.appendChild(d);
-      }
-      el.style.display = 'block';
-    }
-
-    let t1=null, t2=null;
-    pickupInp.addEventListener('input', () => {
-      clearTimeout(t1);
-      const q = pickupInp.value.trim();
-      if (q.length < 3) { pickupSug.style.display='none'; return; }
-      t1 = setTimeout(async () => {
-        const r = await search(q).catch(()=>[]);
-        showSug(pickupSug, r, it => {
-          pickupSug.style.display='none';
-          pickupInp.value = it.display_name;
-          pickup = { lat: Number(it.lat), lon: Number(it.lon), title: it.display_name };
-          setMarker('pickup', pickup);
-        });
-      }, 250);
-    });
-
-    dropInp.addEventListener('input', () => {
-      clearTimeout(t2);
-      const q = dropInp.value.trim();
-      if (q.length < 3) { dropSug.style.display='none'; return; }
-      t2 = setTimeout(async () => {
-        const r = await search(q).catch(()=>[]);
-        showSug(dropSug, r, it => {
-          dropSug.style.display='none';
-          dropInp.value = it.display_name;
-          dropoff = { lat: Number(it.lat), lon: Number(it.lon), title: it.display_name };
-          setMarker('dropoff', dropoff);
-        });
-      }, 250);
-    });
-
-    async function refreshEstimate() {
-      estimate.textContent = '';
-      if (!pickup || !dropoff) return;
-      // Try OSRM for estimate (free). If blocked, we still allow request.
-      const url = `https://router.project-osrm.org/route/v1/driving/${pickup.lon},${pickup.lat};${dropoff.lon},${dropoff.lat}?overview=false`;
-      const r = await fetch(url).then(x=>x.json()).catch(()=>null);
-      if (!r?.routes?.[0]) {
-        estimate.textContent = 'Qiymət hesabı: ünvanlar seçildi.';
-        return;
-      }
-      const distKm = r.routes[0].distance / 1000;
-      const durMin = r.routes[0].duration / 60;
-      const est = await api('/passenger/estimate', { method:'POST', body:{ distanceKm: distKm, durationMin: durMin } });
-      estimate.textContent = `Təxmini məsafə: ${distKm.toFixed(1)} km • vaxt: ${durMin.toFixed(0)} dəq • qiymət: ${est.price} ${est.currency}`;
-    }
-
-    document.getElementById('btnMyLoc').onclick = () => {
-      if (!navigator.geolocation) return toast('Geolocation yoxdur');
-      navigator.geolocation.getCurrentPosition(pos => {
-        const p = { lat: pos.coords.latitude, lon: pos.coords.longitude, title: 'Mənim yerim' };
-        pickup = p;
-        pickupInp.value = 'Mənim yerim';
-        setMarker('pickup', p);
-      }, () => toast('Yer alınmadı'));
-    };
-
-    function showRideCard(text) {
-      document.getElementById('rideCard').style.display = 'block';
-      document.getElementById('rideText').textContent = text;
-    }
-
-    async function pollRide() {
-      if (!rideId) return;
-      const r = await api(`/ride/${rideId}`);
-      if (!r?.ride) return;
-      const rd = r.ride;
-      let text = `Status: ${rd.status}`;
-      if (rd.driverName) text += `\nSürücü: ${rd.driverName}`;
-      if (rd.driverPhone) text += `\nTelefon: ${rd.driverPhone}`;
-      if (rd.price != null) text += `\nQiymət: ${rd.price} ${r.currency}`;
-      showRideCard(text);
-      if (['completed','cancelled'].includes(rd.status)) {
-        rideId = null;
-        toast('Sifariş bitdi');
-        return;
-      }
-      setTimeout(pollRide, 2500);
-    }
-
-    document.getElementById('btnRequest').onclick = async () => {
-      if (!pickup || !dropoff) return toast('Pickup və Dropoff seç');
-      const r = await api('/passenger/requestRide', { method:'POST', body:{ pickup, dropoff } });
-      rideId = r.rideId;
-      toast('Sifariş göndərildi');
-      showRideCard('Sürücü axtarılır...');
-      pollRide();
-    };
-
-    document.getElementById('btnCancel').onclick = async () => {
-      if (!rideId) return;
-      await api(`/ride/${rideId}/cancel`, { method:'POST' });
-      toast('Ləğv olundu');
-    };
-
-    // Init
-    try {
-      const r = await api('/me', { method:'POST' });
-      me = r.user;
-      who.textContent = me.name ? `${me.name}` : `ID: ${me.id}`;
-    } catch (e) {
-      who.textContent = 'Telegram login alınmadı';
-      toast(e.message);
-    }
-  </script>
+  <script src="./common.js"></script>
+  <script src="./passenger.js"></script>
 </body>
 </html>

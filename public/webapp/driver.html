@@ -1,147 +1,55 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="az">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PayTaksi - Sürücü</title>
-  <link rel="stylesheet" href="/assets/app.css" />
-  <script src="https://telegram.org/js/telegram-webapp.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>PayTaksi – Sürücü</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="./app.css" />
 </head>
 <body>
-  <div class="container">
-    <div class="topbar">
-      <div class="brand"><div class="logo">PT</div><div><div class="title">Sürücü</div><div class="subtitle" id="me">...</div></div></div>
-      <a class="ghost" href="/index.html">Geri</a>
-    </div>
-
-    <div class="card">
-      <h2 style="margin:0 0 8px">Status</h2>
-      <div class="row" style="gap:12px;align-items:center">
-        <label class="muted" style="width:110px">Onlayn</label>
-        <label class="switch">
-          <input type="checkbox" id="online" />
-          <span class="slider"></span>
-        </label>
-        <span class="badge" id="state">OFFLINE</span>
-      </div>
-      <div class="muted" style="margin-top:10px">Onlayn olanda yaxın sifarişləri görəcəksən.</div>
-    </div>
-
-    <div class="card">
-      <div class="row" style="justify-content:space-between;align-items:center">
-        <h3 style="margin:0">Gözləyən sifarişlər</h3>
-        <button class="ghost" id="refresh">Yenilə</button>
-      </div>
-      <div id="rides" style="margin-top:12px"></div>
-    </div>
-
-    <div class="card">
-      <h3 style="margin:0 0 10px">Sürücü Məlumatı</h3>
-      <div class="grid" style="grid-template-columns:1fr 1fr">
-        <div>
-          <div class="muted">Maşın</div>
-          <input id="car" placeholder="Məs: Toyota Prius" />
-        </div>
-        <div>
-          <div class="muted">Nömrə</div>
-          <input id="plate" placeholder="Məs: 10-AA-123" />
-        </div>
-      </div>
-      <button class="btn" id="save" style="margin-top:12px">Yadda Saxla</button>
+  <div class="header">
+    <div class="logo">PT</div>
+    <div>
+      <div class="title">Sürücü</div>
+      <div class="badge">Online ol, sifarişləri qəbul et</div>
     </div>
   </div>
 
-  <script type="module">
-    import { api, toast, openMaps } from '/assets/app.js';
+  <div class="container">
+    <div class="card">
+      <div class="label">Məlumat</div>
+      <div class="row">
+        <div class="col"><input id="car" class="input" placeholder="Avtomobil (məs: Prius)"/></div>
+        <div class="col"><input id="plate" class="input" placeholder="Nömrə (məs: 10-AA-123)"/></div>
+      </div>
 
-    const $ = (id) => document.getElementById(id);
-    const ridesEl = $('rides');
+      <div class="row" style="margin-top:10px">
+        <div class="col"><button id="btn_loc" class="btn">📍 Yerimi yenilə</button></div>
+        <div class="col"><button id="btn_on" class="btn primary">✅ Online</button></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="col"><button id="btn_off" class="btn danger">⛔ Offline</button></div>
+      </div>
 
-    async function loadMe() {
-      const me = await api('/me');
-      $('me').textContent = `${me.name} (#${me.id})`;
-      $('online').checked = !!me.driverOnline;
-      $('car').value = me.driver?.car || '';
-      $('plate').value = me.driver?.plate || '';
-      renderState();
-    }
+      <div class="hr"></div>
+      <div class="kv"><span>Vəziyyət</span><b id="state">offline</b></div>
+      <div class="kv"><span>Mənim koordinat</span><b id="me">-</b></div>
+      <div class="kv"><span>Qəbul edilən</span><b id="accepted">-</b></div>
+    </div>
 
-    function renderState() {
-      const on = $('online').checked;
-      $('state').textContent = on ? 'ONLINE' : 'OFFLINE';
-      $('state').style.background = on ? 'rgba(39,174,96,.15)' : 'rgba(142,160,197,.15)';
-      $('state').style.borderColor = on ? 'rgba(39,174,96,.35)' : 'rgba(142,160,197,.25)';
-    }
+    <div class="mapWrap" style="margin-top:12px">
+      <div id="map"></div>
+    </div>
 
-    async function setOnline() {
-      renderState();
-      await api('/driver/online', { method: 'POST', body: { online: $('online').checked } });
-      toast('Yadda saxlandı');
-      await refresh();
-    }
+    <div style="margin-top:12px" id="orders"></div>
+  </div>
 
-    function rideCard(r) {
-      const d = document.createElement('div');
-      d.className = 'ride';
-      d.innerHTML = `
-        <div class="row" style="justify-content:space-between;gap:12px">
-          <div>
-            <div style="font-weight:800">#${r.id.slice(0,6)} · ${r.price} ${r.currency}</div>
-            <div class="muted">${r.distanceKm.toFixed(1)} km · ~${Math.round(r.durationMin)} dəq</div>
-          </div>
-          <span class="badge">${r.status}</span>
-        </div>
-        <div style="margin-top:10px" class="muted">📍 ${r.pickupText}</div>
-        <div style="margin-top:6px" class="muted">🏁 ${r.dropoffText}</div>
-        <div class="row" style="gap:10px;margin-top:12px">
-          <button class="btn" data-act="accept">Qəbul et</button>
-          <button class="ghost" data-act="pick">Pickup</button>
-          <button class="ghost" data-act="drop">Dropoff</button>
-        </div>
-      `;
+  <div id="toast" class="toast"></div>
 
-      d.querySelector('[data-act="accept"]').onclick = async () => {
-        try {
-          await api('/driver/accept', { method: 'POST', body: { rideId: r.id } });
-          toast('Qəbul edildi');
-          await refresh();
-        } catch (e) { toast(e.message); }
-      };
-      d.querySelector('[data-act="pick"]').onclick = () => openMaps(r.pickup.lat, r.pickup.lon, 'Pickup');
-      d.querySelector('[data-act="drop"]').onclick = () => openMaps(r.dropoff.lat, r.dropoff.lon, 'Dropoff');
-
-      return d;
-    }
-
-    async function refresh() {
-      ridesEl.innerHTML = '<div class="muted">Yüklənir...</div>';
-      try {
-        const data = await api('/driver/queue');
-        ridesEl.innerHTML = '';
-        if (!data.rides.length) {
-          ridesEl.innerHTML = '<div class="muted">Sifariş yoxdur.</div>';
-          return;
-        }
-        data.rides.forEach(r => ridesEl.appendChild(rideCard(r)));
-      } catch (e) {
-        ridesEl.innerHTML = `<div class="muted">${e.message}</div>`;
-      }
-    }
-
-    $('online').onchange = () => setOnline();
-    $('refresh').onclick = () => refresh();
-
-    $('save').onclick = async () => {
-      try {
-        await api('/user/update', { method: 'POST', body: { driver: { carModel: $('car').value.trim(), carPlate: $('plate').value.trim() }, role: 'driver' } });
-        toast('Saxlandı');
-        await loadMe();
-      } catch (e) { toast(e.message); }
-    };
-
-    await loadMe();
-    await refresh();
-    setInterval(refresh, 12000);
-  </script>
+  <script src="./common.js"></script>
+  <script src="./driver.js"></script>
 </body>
 </html>
