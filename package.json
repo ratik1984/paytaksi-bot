@@ -10,7 +10,7 @@
     "dev": "NODE_ENV=development node src/index.js"
   },
   "engines": {
-    "node": ">=18"
+   "node": "20.x"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.0",
