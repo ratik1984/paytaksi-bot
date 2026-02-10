@@ -14,7 +14,19 @@ await app.register(jwt, { secret: process.env.JWT_SECRET || 'dev_secret_change_m
 
 const pool = makePool();
 
-app.get('/health', async () => ({ ok: true, ts: new Date().toISOString() }));
+import Fastify from 'fastify';
+
+const app = Fastify({ logger: true });
+
+app.get('/health', async () => {
+  return { ok: true };
+});
+
+// diger route-lar burda...
+
+const port = process.env.PORT || 8080;
+app.listen({ port, host: '0.0.0.0' });
+
 
 async function getSetting(key, fallback) {
   const { rows } = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
