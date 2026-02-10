@@ -1,0 +1,12 @@
+{
+  "name": "paytaksi-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm -w apps/api run dev & npm -w apps/bot run dev & npm -w apps/web run dev & npm -w apps/admin run dev",
+    "db:migrate": "node apps/api/scripts/migrate.js",
+    "lint": "echo \"Add your linters\""
+  }
+}

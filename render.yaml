@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: paytaksi-api
+    env: node
+    plan: free
+    rootDir: apps/api
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: PORT
+        value: 8080
+
+  - type: worker
+    name: paytaksi-bot
+    env: node
+    plan: free
+    rootDir: apps/bot
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+
+  - type: web
+    name: paytaksi-web
+    env: static
+    plan: free
+    rootDir: apps/web
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  - type: web
+    name: paytaksi-admin
+    env: static
+    plan: free
+    rootDir: apps/admin
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
