@@ -16,7 +16,12 @@ async function main() {
     process.exit(1);
   }
 
-  const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL.includes("render.com") ? { rejectUnauthorized: false } : undefined });
+  const isRender = process.env.DATABASE_URL.includes("render.com");
+  const client = new Client({
+    connectionString: process.env.DATABASE_URL,
+    ssl: isRender ? { rejectUnauthorized: false } : undefined
+  });
+
   await client.connect();
 
   await client.query(`
@@ -26,6 +31,11 @@ async function main() {
       applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+
+  if (!fs.existsSync(migrationsDir)) {
+    console.error("Missing migrations dir:", migrationsDir);
+    process.exit(1);
+  }
 
   const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
 

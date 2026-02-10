@@ -1,4 +1,3 @@
--- PayTaksi initial schema (Postgres)
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -58,14 +57,6 @@ CREATE TABLE IF NOT EXISTS trip_offers (
   UNIQUE(trip_id, driver_id)
 );
 
-CREATE TABLE IF NOT EXISTS driver_location_logs (
-  id BIGSERIAL PRIMARY KEY,
-  driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  lat DOUBLE PRECISION NOT NULL,
-  lng DOUBLE PRECISION NOT NULL,
-  ts TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -87,9 +78,3 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   meta JSONB,
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
-CREATE INDEX IF NOT EXISTS idx_drivers_online ON drivers(is_online);
-CREATE INDEX IF NOT EXISTS idx_trips_passenger ON trips(passenger_id);
-CREATE INDEX IF NOT EXISTS idx_trips_driver ON trips(driver_id);
-CREATE INDEX IF NOT EXISTS idx_trip_offers_trip ON trip_offers(trip_id);
