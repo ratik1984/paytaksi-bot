@@ -14,6 +14,8 @@ await app.register(jwt, { secret: process.env.JWT_SECRET || 'dev_secret_change_m
 
 const pool = makePool();
 
+
+
 import Fastify from 'fastify';
 
 const app = Fastify({ logger: true });
@@ -22,10 +24,21 @@ app.get('/health', async () => {
   return { ok: true };
 });
 
-// diger route-lar burda...
+app.get('/', async () => {
+  return { service: 'PayTaksi API' };
+});
 
 const port = process.env.PORT || 8080;
-app.listen({ port, host: '0.0.0.0' });
+
+app.listen({ port, host: '0.0.0.0' })
+  .then(() => {
+    console.log('PayTaksi API running on port', port);
+  })
+  .catch((err) => {
+    app.log.error(err);
+    process.exit(1);
+  });
+
 
 
 async function getSetting(key, fallback) {
