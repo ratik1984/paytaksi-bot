@@ -1,12 +1,11 @@
 {
   "name": "paytaksi-backend",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-  "start": "prisma db push && node src/index.js"
-}
-
+    "start": "prisma generate && prisma db push && node src/index.js",
+    "dev": "node src/index.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "prisma studio"
