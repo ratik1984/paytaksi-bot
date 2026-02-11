@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: paytaksi-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm i && npm run prisma:generate && npm run prisma:migrate
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_LOGIN
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+
+  - type: static
+    name: paytaksi-web
+    rootDir: frontend
+    buildCommand: npm i && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE
+        sync: false

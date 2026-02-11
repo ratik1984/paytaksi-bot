@@ -1,0 +1,143 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PASSENGER
+  DRIVER
+  ADMIN
+}
+
+enum RideStatus {
+  REQUESTED
+  ASSIGNED
+  ARRIVED
+  STARTED
+  COMPLETED
+  CANCELED
+}
+
+enum TopupMethod {
+  CARD_TO_CARD
+  M10
+}
+
+enum DocType {
+  ID_FRONT
+  ID_BACK
+  LICENSE_FRONT
+  LICENSE_BACK
+  CAR_REG_FRONT
+  CAR_REG_BACK
+}
+
+enum DocStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  telegramId      String?  @unique
+  phone           String?  @unique
+  name            String?
+  role            UserRole @default(PASSENGER)
+
+  passwordHash    String?
+
+  driverProfile   DriverProfile?
+  ridesAsPassenger Ride[] @relation("PassengerRides")
+  ridesAsDriver    Ride[] @relation("DriverRides")
+
+  topups          TopupRequest[]
+}
+
+model DriverProfile {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id])
+
+  carMake      String?
+  carModel     String?
+  carYear      Int
+  carPlate     String?
+  carColor     String
+
+  balance      Decimal   @default(0.0)
+  isActive     Boolean   @default(true)
+  isVerified   Boolean   @default(false)
+
+  lastLat      Float?
+  lastLng      Float?
+  lastSeenAt   DateTime?
+
+  documents    DriverDocument[]
+}
+
+model DriverDocument {
+  id         String    @id @default(cuid())
+  driverId   String
+  driver     DriverProfile @relation(fields: [driverId], references: [id])
+  type       DocType
+  filePath   String
+  status     DocStatus @default(PENDING)
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@unique([driverId, type])
+}
+
+model Ride {
+  id            String     @id @default(cuid())
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  passengerId   String
+  passenger     User       @relation("PassengerRides", fields: [passengerId], references: [id])
+
+  driverId      String?
+  driver        User?      @relation("DriverRides", fields: [driverId], references: [id])
+
+  pickupLat     Float
+  pickupLng     Float
+  pickupText    String?
+
+  dropoffLat    Float
+  dropoffLng    Float
+  dropoffText   String?
+
+  distanceKm    Float?
+  fareAzN       Float?
+  commissionAzN Float?
+
+  status        RideStatus @default(REQUESTED)
+}
+
+model TopupRequest {
+  id          String     @id @default(cuid())
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  userId      String
+  user        User       @relation(fields: [userId], references: [id])
+
+  method      TopupMethod
+  amountAzN   Float
+  note        String?
+  status      String     @default("PENDING")
+  adminNote   String?
+}
+
+model Setting {
+  key         String  @id
+  value       String
+}
