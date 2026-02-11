@@ -1,0 +1,78 @@
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  telegram_id TEXT UNIQUE NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('passenger','driver')),
+  name TEXT,
+  phone TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS drivers (
+  id SERIAL PRIMARY KEY,
+  user_id INT UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  car_model TEXT,
+  plate TEXT,
+  status TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('offline','online','busy')),
+  rating NUMERIC(3,2) NOT NULL DEFAULT 5.00,
+  reject_count INT NOT NULL DEFAULT 0,
+  wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS driver_locations (
+  driver_id INT PRIMARY KEY REFERENCES drivers(id) ON DELETE CASCADE,
+  lat NUMERIC(10,7) NOT NULL,
+  lng NUMERIC(10,7) NOT NULL,
+  speed NUMERIC(10,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS trips (
+  id UUID PRIMARY KEY,
+  passenger_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  driver_id INT REFERENCES drivers(id),
+  status TEXT NOT NULL CHECK (status IN ('SEARCHING','ACCEPTED','ARRIVED','STARTED','COMPLETED','CANCELED')),
+  pickup_lat NUMERIC(10,7) NOT NULL,
+  pickup_lng NUMERIC(10,7) NOT NULL,
+  pickup_address TEXT,
+  drop_lat NUMERIC(10,7) NOT NULL,
+  drop_lng NUMERIC(10,7) NOT NULL,
+  drop_address TEXT,
+  payment_method TEXT NOT NULL DEFAULT 'CASH' CHECK (payment_method IN ('CASH','CARD')),
+  est_distance_km NUMERIC(10,3) NOT NULL DEFAULT 0,
+  distance_km_final NUMERIC(10,3),
+  fare_est NUMERIC(12,2) NOT NULL DEFAULT 0,
+  commission_est NUMERIC(12,2) NOT NULL DEFAULT 0,
+  fare_total NUMERIC(12,2),
+  commission NUMERIC(12,2),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS trip_events (
+  id BIGSERIAL PRIMARY KEY,
+  trip_id UUID NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  payload JSONB,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id BIGSERIAL PRIMARY KEY,
+  driver_id INT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('TOPUP','COMMISSION','ADJUST')),
+  amount NUMERIC(12,2) NOT NULL,
+  ref TEXT,
+  status TEXT NOT NULL DEFAULT 'DONE',
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS topup_requests (
+  id UUID PRIMARY KEY,
+  driver_id INT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL,
+  method TEXT NOT NULL DEFAULT 'CARD_TO_CARD',
+  proof_text TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
