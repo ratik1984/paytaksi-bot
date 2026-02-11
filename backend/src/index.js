@@ -66,6 +66,17 @@ async function bootstrap() {
     console.log('ℹ️  ADMIN_LOGIN/ADMIN_PASSWORD not set. Admin panel login disabled until set.');
   }
 
+
+  app.get("/", (req, res) => {
+  res.status(200).send("PayTaksi API is running");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ ok: true, app: "PayTaksi", ts: Date.now() });
+});
+
+
+        
   app.listen(port, () => console.log(`PayTaksi API running on :${port}`));
 }
 
