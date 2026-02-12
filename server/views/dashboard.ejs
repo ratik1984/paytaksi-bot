@@ -1,0 +1,16 @@
+<% const body = `
+<div class="row">
+  <div class="card kpi"><div class="pill">Drivers Pending</div><h2>${counts.driversPending}</h2></div>
+  <div class="card kpi"><div class="pill">Drivers Approved</div><h2>${counts.driversApproved}</h2></div>
+  <div class="card kpi"><div class="pill">Orders Searching</div><h2>${counts.ordersSearching}</h2></div>
+  <div class="card kpi"><div class="pill">Orders Active</div><h2>${counts.ordersActive}</h2></div>
+  <div class="card kpi"><div class="pill">Topups Pending</div><h2>${counts.topupsPending}</h2></div>
+</div>
+<div class="card">
+  <h3>Son sifarişlər</h3>
+  <table><thead><tr><th>ID</th><th>Status</th><th>Fare</th><th>Distance</th><th>Updated</th></tr></thead>
+  <tbody>
+    ${recentOrders.map(o => `<tr><td>#${o.id}</td><td>${o.status}</td><td>${o.fare.toFixed(2)} AZN</td><td>${o.distanceKm.toFixed(2)} km</td><td>${new Date(o.updatedAt).toLocaleString()}</td></tr>`).join("")}
+  </tbody></table>
+</div>
+`; %><%- include("_layout", { body }) %>

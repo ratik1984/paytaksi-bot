@@ -1,0 +1,98 @@
+CREATE TYPE "Role" AS ENUM ('PASSENGER','DRIVER','ADMIN');
+CREATE TYPE "DriverStatus" AS ENUM ('PENDING','APPROVED','REJECTED');
+CREATE TYPE "OrderStatus" AS ENUM ('SEARCHING','ACCEPTED','STARTED','FINISHED','CANCELED');
+CREATE TYPE "TopupStatus" AS ENUM ('PENDING','APPROVED','REJECTED');
+
+CREATE TABLE "User" (
+  "id" SERIAL PRIMARY KEY,
+  "tgId" BIGINT NOT NULL UNIQUE,
+  "role" "Role" NOT NULL,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE "Passenger" (
+  "id" SERIAL PRIMARY KEY,
+  "userId" INT NOT NULL UNIQUE REFERENCES "User"("id") ON DELETE CASCADE
+);
+
+CREATE TABLE "Admin" (
+  "id" SERIAL PRIMARY KEY,
+  "userId" INT NOT NULL UNIQUE REFERENCES "User"("id") ON DELETE CASCADE
+);
+
+CREATE TABLE "Driver" (
+  "id" SERIAL PRIMARY KEY,
+  "userId" INT NOT NULL UNIQUE REFERENCES "User"("id") ON DELETE CASCADE,
+  "status" "DriverStatus" NOT NULL DEFAULT 'PENDING',
+  "carYear" INT,
+  "carColor" TEXT,
+  "balance" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  "idFrontFileId" TEXT,
+  "idBackFileId" TEXT,
+  "dlFrontFileId" TEXT,
+  "dlBackFileId" TEXT,
+  "techFrontFileId" TEXT,
+  "techBackFileId" TEXT,
+  "isOnline" BOOLEAN NOT NULL DEFAULT FALSE,
+  "lastLat" DOUBLE PRECISION,
+  "lastLon" DOUBLE PRECISION,
+  "lastLocAt" TIMESTAMPTZ
+);
+
+CREATE TABLE "Order" (
+  "id" SERIAL PRIMARY KEY,
+  "status" "OrderStatus" NOT NULL DEFAULT 'SEARCHING',
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "passengerId" INT NOT NULL REFERENCES "Passenger"("id") ON DELETE RESTRICT,
+  "driverId" INT REFERENCES "Driver"("id") ON DELETE SET NULL,
+  "pickupLat" DOUBLE PRECISION NOT NULL,
+  "pickupLon" DOUBLE PRECISION NOT NULL,
+  "dropLat" DOUBLE PRECISION NOT NULL,
+  "dropLon" DOUBLE PRECISION NOT NULL,
+  "dropAddress" TEXT,
+  "distanceKm" DOUBLE PRECISION NOT NULL,
+  "fare" DOUBLE PRECISION NOT NULL,
+  "commission" DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE "OrderBroadcast" (
+  "id" SERIAL PRIMARY KEY,
+  "orderId" INT NOT NULL REFERENCES "Order"("id") ON DELETE CASCADE,
+  "driverId" INT NOT NULL REFERENCES "Driver"("id") ON DELETE CASCADE,
+  "sentAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "messageId" INT,
+  UNIQUE ("orderId","driverId")
+);
+
+CREATE TABLE "TopupRequest" (
+  "id" SERIAL PRIMARY KEY,
+  "driverId" INT NOT NULL REFERENCES "Driver"("id") ON DELETE CASCADE,
+  "amount" DOUBLE PRECISION NOT NULL,
+  "method" TEXT NOT NULL,
+  "proofFileId" TEXT,
+  "status" "TopupStatus" NOT NULL DEFAULT 'PENDING',
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "decidedAt" TIMESTAMPTZ
+);
+
+CREATE TABLE "Setting" ("key" TEXT PRIMARY KEY, "value" TEXT NOT NULL);
+
+CREATE TABLE "AuditLog" (
+  "id" SERIAL PRIMARY KEY,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "actorTgId" BIGINT,
+  "action" TEXT NOT NULL,
+  "meta" TEXT
+);
+
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  NEW."updatedAt" = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER order_updated_at
+BEFORE UPDATE ON "Order"
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();

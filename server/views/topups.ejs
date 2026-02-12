@@ -1,0 +1,12 @@
+<% const body = `
+<div class="card"><h2>Topups — ${status}</h2>
+<table><thead><tr><th>ID</th><th>Driver TG</th><th>Amount</th><th>Method</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+<tbody>
+${topups.map(t => `<tr><td>${t.id}</td><td>${t.driver.user.tgId}</td><td>${t.amount.toFixed(2)} AZN</td><td>${t.method}</td><td><span class="pill">${t.status}</span></td><td>${new Date(t.createdAt).toLocaleString()}</td><td>
+${status === "PENDING" ? `<form style="display:inline" method="post" action="/admin/topups/${t.id}/approve"><button class="btn btn-ok" type="submit">Approve</button></form>
+<form style="display:inline" method="post" action="/admin/topups/${t.id}/reject"><button class="btn btn-no" type="submit">Reject</button></form>` : "-"}
+</td></tr>`).join("")}
+</tbody></table>
+<p style="color:#666;font-size:13px">Proof şəkilləri admin botda görünür.</p>
+</div>
+`; %><%- include("_layout", { body }) %>

@@ -1,0 +1,14 @@
+<% const map = Object.fromEntries(settings.map(s => [s.key, s.value])); %>
+<% const body = `
+<div class="card"><h2>Settings</h2>${saved ? '<p class="pill">Saved</p>' : ''}
+<form method="post" action="/admin/settings">
+<div style="display:flex; gap:10px; flex-wrap:wrap">
+<div><label>commission_percent</label><br/><input name="commission_percent" value="${map.commission_percent || ''}" /></div>
+<div><label>base_fare</label><br/><input name="base_fare" value="${map.base_fare || ''}" /></div>
+<div><label>included_km</label><br/><input name="included_km" value="${map.included_km || ''}" /></div>
+<div><label>per_km_after</label><br/><input name="per_km_after" value="${map.per_km_after || ''}" /></div>
+<div><label>driver_block_balance</label><br/><input name="driver_block_balance" value="${map.driver_block_balance || ''}" /></div>
+</div>
+<div style="margin-top:12px"><button class="btn btn-ok" type="submit">Save</button></div>
+</form></div>
+`; %><%- include("_layout", { body }) %>

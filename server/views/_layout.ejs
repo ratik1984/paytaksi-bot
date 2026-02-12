@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"/><title>PayTaksi Admin</title>
+<style>body{font-family:system-ui;margin:0;background:#f7f7fb}.top{background:#111;color:#fff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between}.wrap{display:flex}.side{width:240px;background:#fff;min-height:calc(100vh - 52px);border-right:1px solid #eee;padding:12px}.side a{display:block;padding:10px 12px;border-radius:10px;color:#111;text-decoration:none;margin:6px 0}.side a:hover{background:#f1f1f1}.content{flex:1;padding:18px}.card{background:#fff;border-radius:14px;padding:14px;box-shadow:0 10px 24px rgba(0,0,0,.06);margin-bottom:12px}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:14px}.pill{display:inline-block;padding:4px 10px;border-radius:999px;background:#eee;font-size:12px}.btn{padding:8px 12px;border-radius:10px;border:none;cursor:pointer}.btn-ok{background:#0b7;color:#fff}.btn-no{background:#c33;color:#fff}.btn-ghost{background:#eee}.row{display:flex;gap:12px;flex-wrap:wrap}.kpi{min-width:220px}input{padding:8px;border:1px solid #ddd;border-radius:10px}</style></head>
+<body><div class="top"><div><b>PayTaksi</b> Admin Panel</div><form method="post" action="/admin/logout"><button class="btn btn-ghost" type="submit">Logout</button></form></div>
+<div class="wrap"><div class="side">
+<a href="/admin">Dashboard</a>
+<a href="/admin/drivers?status=PENDING">Drivers (Pending)</a>
+<a href="/admin/drivers?status=APPROVED">Drivers (Approved)</a>
+<a href="/admin/topups?status=PENDING">Topups (Pending)</a>
+<a href="/admin/orders?status=SEARCHING">Orders (Searching)</a>
+<a href="/admin/orders?status=ACCEPTED">Orders (Accepted)</a>
+<a href="/admin/orders?status=STARTED">Orders (Started)</a>
+<a href="/admin/orders?status=FINISHED">Orders (Finished)</a>
+<a href="/admin/orders?status=CANCELED">Orders (Canceled)</a>
+<a href="/admin/settings">Settings</a>
+</div><div class="content"><%- body %></div></div></body></html>
