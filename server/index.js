@@ -9,13 +9,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync } from "child_process";
 
-import { prisma } from "./lib/prisma.js";
-import { initSettings } from "./lib/settings.js";
-import { startPassengerBot } from "./bots/passenger.js";
-import { startDriverBot } from "./bots/driver.js";
-import { startAdminBot } from "./bots/admin.js";
-import { adminRouter } from "./web/admin.js";
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -36,17 +29,41 @@ app.use(session({
 }));
 
 app.get("/", (req, res) => res.send("PayTaksi is running. Admin panel: /admin"));
-app.use("/admin", adminRouter);
 
 const PORT = process.env.PORT || 3000;
 
 async function main() {
-  // DB migrate (Render build does it too, keep safe)
-  try { execSync("npx prisma migrate deploy", { stdio: "inherit" }); }
-  catch (e) { console.warn("migrate deploy warning:", e?.message || e); }
+  // IMPORTANT:
+  // Some hosts (like Render) may start the service without running `prisma generate`.
+  // We run it on startup to guarantee @prisma/client is initialized.
+  try {
+    execSync("npx prisma generate", { stdio: "inherit" });
+  } catch (e) {
+    console.warn("prisma generate warning:", e?.message || e);
+  }
+
+  // Load Prisma and other modules AFTER generate
+  const [{ prisma }, { initSettings }, { startPassengerBot }, { startDriverBot }, { startAdminBot }, { adminRouter }] =
+    await Promise.all([
+      import("./lib/prisma.js"),
+      import("./lib/settings.js"),
+      import("./bots/passenger.js"),
+      import("./bots/driver.js"),
+      import("./bots/admin.js"),
+      import("./web/admin.js")
+    ]);
+
+  // DB migrate (safe to run each start)
+  try {
+    execSync("npx prisma migrate deploy", { stdio: "inherit" });
+  } catch (e) {
+    console.warn("migrate deploy warning:", e?.message || e);
+  }
 
   await prisma.$connect();
   await initSettings();
+
+  app.use("/admin", adminRouter);
 
   startPassengerBot();
   startDriverBot();
