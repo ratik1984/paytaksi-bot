@@ -74,7 +74,7 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE, db: S
         return
 
     cq = update.callback_query
-    data = = cq.data or ""
+    data = cq.data or ""
     await cq.answer()
 
     if data.startswith("drv|"):
