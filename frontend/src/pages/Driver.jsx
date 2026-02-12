@@ -34,21 +34,32 @@ export default function Driver() {
     setProfile(r.user?.driverProfile || null);
   }
 
-  useEffect(() => { if (!token) ensureLogin().catch(()=>{}); }, []);
-  useEffect(() => { if (token) refresh().catch(()=>{}); }, [token]);
-
   useEffect(() => {
-    if (!token || !me?.id) return;
-    socketRef.current = getSocket();
-    socketRef.current.emit("join", { role: "DRIVER", userId: me.id });
-    socketRef.current.on("ride_offer", (p) => setOffer(p));
-    socketRef.current.on("ride_update", (p) => { if (p?.ride) setRide(p.ride); });
-    return () => {
-      try { socketRef.current?.off("ride_offer"); socketRef.current?.off("ride_update"); } catch {}
-    };
-  }, [token, me?.id]);
+  if (!token || !me?.id) return;
 
-  async function register() {
+  const sock = getSocket();
+  socketRef.current = sock;
+
+  const doJoin = () => {
+    try { sock.emit("join", { role: "DRIVER", userId: me.id }); } catch {}
+  };
+
+  // Join on first connect and every reconnect (rooms reset on reconnect)
+  sock.on("connect", doJoin);
+  if (sock.connected) doJoin();
+
+  sock.on("ride_offer", (p) => setOffer(p));
+  sock.on("ride_update", (p) => { if (p?.ride) setRide(p.ride); });
+
+  return () => {
+    try {
+      sock.off("connect", doJoin);
+      sock.off("ride_offer");
+      sock.off("ride_update");
+    } catch {}
+  };
+}, [token, me?.id]);
+async function register() {
     setMsg("");
     try {
       await api("/driver/register", { method:"POST", token, body: { carYear: Number(carYear), carColor, carModel, carPlate } });

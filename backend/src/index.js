@@ -54,7 +54,11 @@ const io = new Server(server, {
 // - "driver:<userId>" for individual driver
 // - "passenger:<userId>" for passenger updates
 io.on("connection", (socket) => {
+  console.log("socket connected", socket.id);
+
   socket.on("join", ({ role, userId }) => {
+    console.log("socket join", { role, userId });
+
     if (role === "DRIVER") {
       socket.join("drivers");
       socket.join(`driver:${userId}`);

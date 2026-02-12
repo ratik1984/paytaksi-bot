@@ -15,54 +15,30 @@ L.Icon.Default.mergeOptions({ iconRetinaUrl, iconUrl, shadowUrl });
 function useDebounced(value, ms=500) {
   const [v, setV] = useState(value);
   useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
+  if (!token || !me?.id) return;
 
-export default function Passenger() {
-  const [token, setTokState] = useState(getToken());
-  const [me, setMe] = useState(null);
+  const sock = getSocket();
+  socketRef.current = sock;
 
-  const [pos, setPos] = useState(null); // {lat,lng}
-  const [posName, setPosName] = useState("");
-  const [drop, setDrop] = useState(null);
-  const [dropText, setDropText] = useState("");
-  const [suggest, setSuggest] = useState([]);
-  const deb = useDebounced(dropText, 450);
+  const doJoin = () => {
+    try { sock.emit("join", { role: "PASSENGER", userId: me.id }); } catch {}
+  };
 
-  const [ride, setRide] = useState(null);
-  const [status, setStatus] = useState("");
-  const socketRef = useRef(null);
+  sock.on("connect", doJoin);
+  if (sock.connected) doJoin();
 
-  const poly = useMemo(() => {
-    if (!pos || !drop) return null;
-    return [[pos.lat, pos.lng], [drop.lat, drop.lng]];
-  }, [pos, drop]);
+  sock.on("ride_update", (p) => {
+    if (p?.ride) { setRide(p.ride); setStatus(p.status); }
+  });
 
-  async function ensureLogin() {
-    const tg = getTgUser() || { id: "demo_passenger", first_name: "Demo", last_name: "Passenger", username: "demo" };
-    const r = await api("/auth/telegram", { method:"POST", body: { user: tg, role: "PASSENGER" } });
-    setToken(r.token);
-    setTokState(r.token);
-    setMe(r.user);
-  }
-
-  useEffect(() => { if (!token) ensureLogin().catch(()=>{}); }, []);
-  useEffect(() => {
-    if (!token) return;
-    socketRef.current = getSocket();
-    socketRef.current.emit("join", { role: "PASSENGER", userId: me?.id || "" });
-    socketRef.current.on("ride_update", (p) => {
-      if (p?.ride) { setRide(p.ride); setStatus(p.status); }
-    });
-    return () => {
-      try { socketRef.current?.off("ride_update"); } catch {}
-    };
-  }, [token, me?.id]);
-
-  // get gps
+  return () => {
+    try {
+      sock.off("connect", doJoin);
+      sock.off("ride_update");
+    } catch {}
+  };
+}, [token, me?.id]);
+// get gps
   useEffect(() => {
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(async (p) => {
