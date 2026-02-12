@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Settings</h2>
+  <form method="post">
+    <p>Commission rate (0.10 = 10%):<br><input name="commission_rate" value="{{s.get('commission_rate','0.10')}}" /></p>
+    <p>Base fare (AZN):<br><input name="base_fare" value="{{s.get('base_fare','3.50')}}" /></p>
+    <p>Included km:<br><input name="included_km" value="{{s.get('included_km','3.0')}}" /></p>
+    <p>Per km after included:<br><input name="per_km_after" value="{{s.get('per_km_after','0.40')}}" /></p>
+    <button class="btn btn-ok" type="submit">Save</button>
+  </form>
+</div>
+{% endblock %}
