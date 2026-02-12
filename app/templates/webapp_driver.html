@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi — Sürücü</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/webapp.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>PayTaksi — Sürücü</h1>
+
+    <div class="card">
+      <div class="row between">
+        <div>
+          <div class="muted">Status</div>
+          <div id="st" class="big">—</div>
+        </div>
+        <div>
+          <div class="muted">Balans</div>
+          <div id="bal" class="big">—</div>
+        </div>
+      </div>
+      <div id="note" class="muted small"></div>
+    </div>
+
+    <div class="card">
+      <div class="muted">Son sifariş</div>
+      <div id="last" class="small">Hələlik yoxdur</div>
+      <button id="btnRefresh" class="btn">🔄 Yenilə</button>
+    </div>
+
+  </div>
+
+  <script src="/static/webapp_driver.js"></script>
+</body>
+</html>

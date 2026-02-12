@@ -1,29 +1,30 @@
 from __future__ import annotations
-from decimal import Decimal
+
 from sqlalchemy.orm import Session
-from ..models import User, Role, DriverProfile, DriverStatus
+
+from ..models import User, Role
 from .geo import haversine_km
 
-def pick_nearest_driver(db: Session, lat: float, lon: float) -> User | None:
-    # Choose nearest approved driver with known last location
+
+def pick_nearest_driver(db: Session, lat: float, lon: float):
+    """Pick nearest approved driver with balance > -10."""
     drivers = (
         db.query(User)
-        .join(DriverProfile, DriverProfile.user_id == User.id)
         .filter(User.role == Role.driver)
-        .filter(DriverProfile.status == DriverStatus.approved)
-        .filter(DriverProfile.last_lat.isnot(None))
-        .filter(DriverProfile.last_lon.isnot(None))
+        .filter(User.is_approved == True)
+        .filter(User.balance > -10)
         .all()
     )
     best = None
     best_d = None
-    for u in drivers:
-        dp = u.driver
+    for d in drivers:
+        if d.last_lat is None or d.last_lon is None:
+            continue
         try:
-            d = haversine_km(lat, lon, float(dp.last_lat), float(dp.last_lon))
+            dl = haversine_km(lat, lon, float(d.last_lat), float(d.last_lon))
         except Exception:
             continue
-        if best is None or d < best_d:
-            best = u
-            best_d = d
+        if best_d is None or dl < best_d:
+            best = d
+            best_d = dl
     return best

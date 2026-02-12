@@ -1,6 +1,9 @@
 from __future__ import annotations
 import asyncio
 from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -17,6 +20,7 @@ from .config import (
 from .db import engine, SessionLocal
 from .models import Base, Setting
 from .web.admin import router as admin_router
+from .web.webapp import router as webapp_router
 
 from .bots import passenger as passenger_bot
 from .bots import driver as driver_bot
@@ -26,6 +30,11 @@ from .bots import admin_bot as admin_bot_mod
 app = FastAPI(title="PayTaksi")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False)
 app.include_router(admin_router)
+app.include_router(webapp_router)
+
+# ---- Static / Templates (Telegram Mini App) ----
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+templates = Jinja2Templates(directory="app/templates")
 
 # ---- DB init ----
 Base.metadata.create_all(bind=engine)
