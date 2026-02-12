@@ -153,6 +153,19 @@ async def choose_dest(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Se
     )
 
 
+
+async def passenger_router(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Session):
+    """Route db-bound callback actions.
+
+    app.main calls this before process_update(), so we can handle callbacks that need DB access.
+    """
+    if update.callback_query and update.callback_query.data:
+        data = update.callback_query.data
+        # Destination choice from inline keyboard
+        if data.startswith("dest|"):
+            await choose_dest(update, context, db)
+
+
 def build_handlers():
     return [
         CommandHandler("start", start),
