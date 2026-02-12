@@ -3,197 +3,169 @@ from __future__ import annotations
 from decimal import Decimal
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
-from ..config import PAYTAKSI_PASSENGER_BOT_TOKEN, PAYTAKSI_DRIVER_BOT_TOKEN
 from ..db import SessionLocal
-from ..models import Role, Ride, RideStatus
-from ..services.pricing import calc_fare, calc_commission
+from ..models import User, Role, Ride, RideStatus, DriverProfile, DriverStatus
 from ..services.geo import haversine_km
-from ..services.assign import pick_nearest_driver
-from ..bots.common import get_or_create_user
-from .webapp_auth import parse_init_data, validate_init_data
-
+from ..services.pricing import calc_fare, calc_commission, DEFAULT_COMMISSION_RATE
+from ..config import PAYTAKSI_PASSENGER_BOT_TOKEN, PAYTAKSI_DRIVER_BOT_TOKEN
+from .webapp_auth import validate_init_data, parse_init_data
 
 router = APIRouter()
 
-
-def _read_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
+BASE_DIR = Path(__file__).resolve().parents[1]  # app/
+TEMPLATES_DIR = BASE_DIR / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 @router.get("/webapp/passenger", response_class=HTMLResponse)
-async def webapp_passenger(request: Request):
-    # Simple static HTML (served by FastAPI). Telegram Mini App opens this URL.
-    return HTMLResponse(_read_file("app/templates/webapp_passenger.html"))
-
+def webapp_passenger(request: Request):
+    return templates.TemplateResponse("webapp_passenger.html", {"request": request})
 
 @router.get("/webapp/driver", response_class=HTMLResponse)
-async def webapp_driver(request: Request):
-    return HTMLResponse(_read_file("app/templates/webapp_driver.html"))
+def webapp_driver(request: Request):
+    return templates.TemplateResponse("webapp_driver.html", {"request": request})
 
+def db_session() -> Session:
+    return SessionLocal()
 
-@router.get("/webapp/health")
-async def webapp_health():
-    return {"ok": True}
-
+def _get_or_create_user(db: Session, telegram_id: int, name: str, role: Role) -> User:
+    u = db.query(User).filter(User.telegram_id == telegram_id).first()
+    if u:
+        # allow role upgrade only if empty; otherwise keep
+        if u.role != role:
+            u.role = role
+        if name and (u.name or "") != name:
+            u.name = name
+        return u
+    u = User(telegram_id=telegram_id, name=name or "", role=role)
+    db.add(u)
+    db.flush()
+    return u
 
 @router.post("/api/webapp/passenger/create_ride")
 async def api_create_ride(payload: dict):
-    """
-    Create a ride from Telegram Mini App.
-
-    Expected payload:
-      {
-        "initData": "<Telegram WebApp initData>",
-        "pickup": {"lat": 40.4, "lon": 49.8, "address": "..."},
-        "dest": {"lat": 40.3, "lon": 49.9, "address": "..."}
-      }
-    """
     init_data = (payload.get("initData") or "").strip()
     if not init_data:
-        raise HTTPException(status_code=400, detail="initData is required")
+        return JSONResponse({"ok": False, "error": "initData yoxdur (Mini App bot içindən açılmalıdır)."}, status_code=400)
 
-    # Validate initData using PASSENGER bot token (Mini App should be opened from passenger bot)
+    # validate against passenger bot token
     if not validate_init_data(init_data, PAYTAKSI_PASSENGER_BOT_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid initData")
+        return JSONResponse({"ok": False, "error": "Telegram initData doğrulanmadı."}, status_code=401)
 
-    data = parse_init_data(init_data)
-    user = data.get("user") or {}
-    tg_id = user.get("id")
-    full_name = (user.get("first_name") or "") + (" " + user.get("last_name") if user.get("last_name") else "")
-    full_name = full_name.strip() or (user.get("username") or "")
-    if not tg_id:
-        raise HTTPException(status_code=400, detail="initData user.id missing")
+    user = parse_init_data(init_data)
 
-    pickup = payload.get("pickup") or {}
-    dest = payload.get("dest") or {}
+    pickup = payload.get("pickup") or payload.get("pickup_loc") or {}
+    dest = payload.get("dest") or payload.get("destination") or {}
+
     try:
         plat = float(pickup.get("lat"))
         plon = float(pickup.get("lon"))
         dlat = float(dest.get("lat"))
         dlon = float(dest.get("lon"))
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid coordinates")
+        return JSONResponse({"ok": False, "error": "Lokasiya məlumatı yanlışdır."}, status_code=400)
 
-    pickup_addr = str(pickup.get("address") or "")[:255]
-    dest_addr = str(dest.get("address") or "")[:255]
+    pickup_address = (payload.get("pickup_address") or "").strip()
+    dest_address = (payload.get("dest_address") or payload.get("destination_text") or "").strip()
 
-    # calc
-    dkm = haversine_km(plat, plon, dlat, dlon)
-    fare: Decimal = calc_fare(dkm)
-    comm: Decimal = calc_commission(fare)
+    dist_km = haversine_km(plat, plon, dlat, dlon)
+    fare = calc_fare(dist_km)
+    commission = calc_commission(fare, DEFAULT_COMMISSION_RATE)
 
-    db: Session = SessionLocal()
+    db = db_session()
     try:
-        passenger = get_or_create_user(db, int(tg_id), Role.passenger, full_name)
+        u = _get_or_create_user(db, int(user["id"]), user.get("name",""), Role.passenger)
         ride = Ride(
-            passenger_user_id=passenger.id,
+            passenger_user_id=u.id,
+            status=RideStatus.new,
             pickup_lat=str(plat),
             pickup_lon=str(plon),
-            pickup_address=pickup_addr,
+            pickup_address=pickup_address,
             dest_lat=str(dlat),
             dest_lon=str(dlon),
-            dest_address=dest_addr,
-            distance_km=dkm,
+            dest_address=dest_address,
+            distance_km=dist_km,
             fare_azn=fare,
-            commission_azn=comm,
-            status=RideStatus.new,
+            commission_azn=commission
         )
         db.add(ride)
         db.commit()
-        db.refresh(ride)
-
-        driver = pick_nearest_driver(db, plat, plon)
-        driver_tg = None
-        if driver:
-            ride.driver_user_id = driver.id
-            ride.status = RideStatus.offered
-            db.commit()
-            driver_tg = driver.telegram_id
-
-        return JSONResponse(
-            {
-                "ride_id": ride.id,
-                "distance_km": float(dkm),
-                "fare_azn": str(fare),
-                "commission_azn": str(comm),
-                "assigned_driver_tg": driver_tg,
-            }
-        )
+        return {"ok": True, "ride_id": ride.id, "distance_km": str(dist_km), "fare": str(fare)}
     finally:
         db.close()
-
 
 @router.post("/api/webapp/driver/my_rides")
-async def api_driver_my_rides(payload: dict):
+async def api_driver_rides(payload: dict):
     init_data = (payload.get("initData") or "").strip()
     if not init_data:
-        raise HTTPException(status_code=400, detail="initData is required")
+        return JSONResponse({"ok": False, "error": "initData yoxdur."}, status_code=400)
 
-    # Validate initData using DRIVER bot token (Mini App should be opened from driver bot)
     if not validate_init_data(init_data, PAYTAKSI_DRIVER_BOT_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid initData")
+        return JSONResponse({"ok": False, "error": "Telegram initData doğrulanmadı."}, status_code=401)
 
-    data = parse_init_data(init_data)
-    user = data.get("user") or {}
-    tg_id = user.get("id")
-    if not tg_id:
-        raise HTTPException(status_code=400, detail="initData user.id missing")
-
-    db: Session = SessionLocal()
+    user = parse_init_data(init_data)
+    db = db_session()
     try:
-        driver = get_or_create_user(db, int(tg_id), Role.driver, (user.get("first_name") or ""))
+        u = _get_or_create_user(db, int(user["id"]), user.get("name",""), Role.driver)
+
+        dp = db.query(DriverProfile).filter(DriverProfile.user_id == u.id).first()
+        if not dp or dp.status != DriverStatus.approved:
+            return {"ok": True, "rides": [], "note": "Sürücü hesabı hələ təsdiqlənməyib."}
+
         rides = (
             db.query(Ride)
-            .filter(Ride.driver_user_id == driver.id)
+            .filter(Ride.status.in_([RideStatus.offered, RideStatus.accepted, RideStatus.arrived, RideStatus.started]))
             .order_by(Ride.created_at.desc())
-            .limit(20)
+            .limit(30)
             .all()
         )
-        items = []
-        for r in rides:
-            items.append(
-                {
-                    "id": r.id,
-                    "status": getattr(r.status, "value", str(r.status)),
-                    "pickup_address": r.pickup_address,
-                    "dropoff_address": r.dest_address,
-                    "fare_azn": str(r.fare_azn),
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                }
-            )
-        return {"rides": items}
+
+        def to_dict(r: Ride):
+            return {
+                "id": r.id,
+                "status": r.status.value if hasattr(r.status, "value") else str(r.status),
+                "pickup_address": r.pickup_address,
+                "dropoff_address": r.dest_address,
+                "fare": str(r.fare_azn),
+            }
+
+        return {"ok": True, "rides": [to_dict(r) for r in rides]}
     finally:
         db.close()
-
 
 @router.post("/api/webapp/driver/accept_ride")
-async def api_driver_accept_ride(payload: dict):
+async def api_driver_accept(payload: dict):
     init_data = (payload.get("initData") or "").strip()
+    if not init_data:
+        return JSONResponse({"ok": False, "error": "initData yoxdur."}, status_code=400)
+    if not validate_init_data(init_data, PAYTAKSI_DRIVER_BOT_TOKEN):
+        return JSONResponse({"ok": False, "error": "Telegram initData doğrulanmadı."}, status_code=401)
+
     ride_id = payload.get("ride_id")
-    if not init_data or not ride_id:
-        raise HTTPException(status_code=400, detail="initData and ride_id required")
-    data = parse_init_data(init_data)
-    if not verify_init_data(init_data, bot_token=PAYTAKSI_DRIVER_BOT_TOKEN):
-        raise HTTPException(status_code=401, detail="Bad initData")
-    user = data.get("user") or {}
-    telegram_id = int(user.get("id"))
-    full_name = (user.get("first_name") or "") + (" " + user.get("last_name") if user.get("last_name") else "")
-    db: Session = SessionLocal()
+    if not ride_id:
+        return JSONResponse({"ok": False, "error": "ride_id yoxdur."}, status_code=400)
+
+    user = parse_init_data(init_data)
+    db = db_session()
     try:
-        drv = get_or_create_user(db, telegram_id=telegram_id, role=Role.driver, full_name=full_name.strip())
-        ride = db.query(Ride).filter(Ride.id == int(ride_id)).one_or_none()
+        u = _get_or_create_user(db, int(user["id"]), user.get("name",""), Role.driver)
+        dp = db.query(DriverProfile).filter(DriverProfile.user_id == u.id).first()
+        if not dp or dp.status != DriverStatus.approved:
+            return JSONResponse({"ok": False, "error": "Sürücü hesabı təsdiqli deyil."}, status_code=403)
+
+        ride = db.query(Ride).filter(Ride.id == int(ride_id)).first()
         if not ride:
-            raise HTTPException(status_code=404, detail="Ride not found")
-        if ride.status not in (RideStatus.pending, RideStatus.assigned):
-            raise HTTPException(status_code=400, detail=f"Ride status is {ride.status}")
-        ride.driver_id = drv.id
+            return JSONResponse({"ok": False, "error": "Sifariş tapılmadı."}, status_code=404)
+        if ride.status not in [RideStatus.new, RideStatus.offered]:
+            return JSONResponse({"ok": False, "error": "Bu sifariş artıq götürülüb və ya bağlanıb."}, status_code=409)
+
+        ride.driver_user_id = u.id
         ride.status = RideStatus.accepted
         db.commit()
-        return JSONResponse({"ok": True, "ride_id": ride.id})
+        return {"ok": True}
     finally:
         db.close()
-
-
