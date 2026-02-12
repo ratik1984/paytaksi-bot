@@ -1,86 +1,109 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import morgan from 'morgan';
-import path from 'path';
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+import http from "http";
+import { Server } from "socket.io";
 
-import { prisma } from './lib/prisma.js';
-import { ensureDefaultSettings } from './lib/settings.js';
-import { requireAuth, requireRole } from './middleware/auth.js';
-
-import authRouter from './routes/auth.js';
-import ridesRouter from './routes/rides.js';
-import driverRouter from './routes/driver.js';
-import placesRouter from './routes/places.js';
-import topupsRouter from './routes/topups.js';
-import adminRouter from './routes/admin.js';
-import bcrypt from 'bcryptjs';
+import { bootstrap } from "./lib/bootstrap.js";
+import { prisma } from "./lib/prisma.js";
+import { requireAuth } from "./lib/auth.js";
+import geoRoutes from "./routes/geo.js";
+import authRoutes from "./routes/auth.js";
+import driverRoutes from "./routes/driver.js";
+import rideRoutes from "./routes/rides.js";
+import adminRoutes from "./routes/admin.js";
+import { haversineKm } from "./lib/geo.js";
+import { CONFIG } from "./lib/config.js";
 
 const app = express();
 
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
+app.use(helmet());
+app.use(morgan("dev"));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// CORS: allow Telegram WebApp (often "null" origin)
+app.use(cors({
+  origin: true,
+  credentials: true
 }));
-app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true }));
-app.use(express.json({ limit: '2mb' }));
-app.use(morgan('dev'));
 
-// static uploads (Render disk can be ephemeral; for prod use S3)
-const uploadDir = process.env.UPLOAD_DIR || 'uploads';
-app.use('/uploads', express.static(path.resolve(uploadDir)));
+app.get("/", (req, res) => res.status(200).send("PayTaksi v2 API is running"));
+app.get("/health", async (req, res) => {
+  const db = await prisma.$queryRaw`SELECT 1 as ok`;
+  res.json({ ok: true, db, ts: Date.now() });
+});
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.use("/uploads", express.static(new URL("../uploads", import.meta.url).pathname));
 
-app.use('/auth', authRouter);
-app.use('/places', placesRouter);
+app.use("/geo", geoRoutes);
+app.use("/auth", authRoutes);
+app.use("/driver", driverRoutes);
+app.use("/rides", rideRoutes);
+app.use("/admin", adminRoutes);
 
-app.use('/rides', requireAuth, ridesRouter);
-app.use('/driver', requireAuth, requireRole(['DRIVER', 'ADMIN']), driverRouter);
-app.use('/topups', requireAuth, topupsRouter);
-app.use('/admin', requireAuth, requireRole(['ADMIN']), adminRouter);
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: true, credentials: true }
+});
 
-const port = parseInt(process.env.PORT || '3000', 10);
-
-async function bootstrap() {
-  await ensureDefaultSettings();
-
-  // Bootstrap admin user (password auth for admin panel)
-  const adminLogin = process.env.ADMIN_LOGIN;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-  if (adminLogin && adminPassword) {
-    const existing = await prisma.user.findFirst({ where: { phone: adminLogin } });
-    if (!existing) {
-      const hash = await bcrypt.hash(adminPassword, 10);
-      await prisma.user.create({
-        data: {
-          phone: adminLogin,
-          passwordHash: hash,
-          role: 'ADMIN',
-          name: 'Admin'
-        }
-      });
-      console.log('✅ Admin user created:', adminLogin);
+// Socket rooms:
+// - "drivers" for driver broadcast
+// - "driver:<userId>" for individual driver
+// - "passenger:<userId>" for passenger updates
+io.on("connection", (socket) => {
+  socket.on("join", ({ role, userId }) => {
+    if (role === "DRIVER") {
+      socket.join("drivers");
+      socket.join(`driver:${userId}`);
+    } else if (role === "PASSENGER") {
+      socket.join(`passenger:${userId}`);
     }
-  } else {
-    console.log('ℹ️  ADMIN_LOGIN/ADMIN_PASSWORD not set. Admin panel login disabled until set.');
+  });
+});
+
+// Helper: broadcast ride offer to nearby approved drivers
+async function broadcastRideOffer(rideId) {
+  const ride = await prisma.ride.findUnique({ where: { id: rideId } });
+  if (!ride) return;
+
+  // candidate drivers: approved + balance > min
+  const minBal = parseFloat((await prisma.setting.findUnique({ where: { key: "driverMinBalance" } }))?.value ?? String(CONFIG.driverMinBalance));
+  const drivers = await prisma.driverProfile.findMany({
+    where: { status: "APPROVED", balance: { gt: minBal } },
+    select: { userId: true, id: true }
+  });
+
+  // load latest location for each driver (simple approach)
+  const offers = [];
+  for (const d of drivers) {
+    const loc = await prisma.driverLocation.findFirst({
+      where: { driverId: d.id },
+      orderBy: { createdAt: "desc" }
+    });
+    if (!loc) continue;
+    const dist = haversineKm(ride.pickupLat, ride.pickupLng, loc.lat, loc.lng);
+    if (dist <= 6) { // 6 km radius
+      offers.push({ userId: d.userId, dist });
+    }
+  }
+  offers.sort((a,b)=>a.dist-b.dist);
+  const top = offers.slice(0, 30); // max 30 drivers ping
+
+  for (const o of top) {
+    io.to(`driver:${o.userId}`).emit("ride_offer", { rideId, distanceKm: o.dist });
   }
 
-
-  app.get("/", (req, res) => {
-  res.status(200).send("PayTaksi API is running");
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({ ok: true, app: "PayTaksi", ts: Date.now() });
-});
-
-
-        
-  app.listen(port, () => console.log(`PayTaksi API running on :${port}`));
+  await prisma.ride.update({ where: { id: rideId }, data: { status: "OFFERED" } });
 }
 
-bootstrap().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Expose for routes
+app.locals.io = io;
+app.locals.broadcastRideOffer = broadcastRideOffer;
+
+const PORT = process.env.PORT || 3000;
+
+await bootstrap();
+server.listen(PORT, () => console.log(`PayTaksi v2 backend listening on ${PORT}`));

@@ -1,103 +1,86 @@
-import express from 'express';
-import { z } from 'zod';
-import { prisma } from '../lib/prisma.js';
-import { getPricing, setSetting } from '../lib/settings.js';
+import { Router } from "express";
+import { z } from "zod";
+import bcrypt from "bcryptjs";
+import { prisma } from "../lib/prisma.js";
+import jwt from "jsonwebtoken";
+import { requireAuth, requireAdmin } from "../lib/auth.js";
 
-const router = express.Router();
+const router = Router();
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 
-router.get('/dashboard', async (_req, res) => {
-  const [users, drivers, rides, topups] = await Promise.all([
-    prisma.user.count(),
-    prisma.driverProfile.count(),
-    prisma.ride.count(),
-    prisma.topupRequest.count()
-  ]);
-  res.json({ users, drivers, rides, topups, pricing: await getPricing() });
+router.post("/login", async (req, res) => {
+  const body = z.object({ login: z.string(), password: z.string() }).parse(req.body);
+  const admin = await prisma.adminUser.findUnique({ where: { login: body.login } });
+  if (!admin) return res.status(401).json({ error: "invalid" });
+  const ok = await bcrypt.compare(body.password, admin.passHash);
+  if (!ok) return res.status(401).json({ error: "invalid" });
+
+  const token = jwt.sign({ uid: admin.id, role: "ADMIN" }, JWT_SECRET, { expiresIn: "30d" });
+  res.json({ token });
 });
 
-router.get('/drivers', async (_req, res) => {
-  const items = await prisma.driverProfile.findMany({
-    include: { user: true, documents: true },
-    orderBy: { user: { createdAt: 'desc' } },
-    take: 100
+// attach req.user via requireAuth then allow admin
+router.get("/drivers", requireAuth, requireAdmin, async (req, res) => {
+  const status = String(req.query.status || "PENDING");
+  const drivers = await prisma.driverProfile.findMany({
+    where: { status: status },
+    include: { user: true, documents: true }
   });
-  res.json({ items });
+  res.json({ drivers });
 });
 
-router.post('/drivers/:id/verify', async (req, res) => {
-  const id = String(req.params.id);
-  const schema = z.object({ isVerified: z.boolean(), isActive: z.boolean().optional() });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+router.post("/drivers/status", requireAuth, requireAdmin, async (req, res) => {
+  const body = z.object({
+    userId: z.string(),
+    status: z.enum(["APPROVED","REJECTED","PENDING"])
+  }).parse(req.body);
 
-  const upd = await prisma.driverProfile.update({
-    where: { id },
-    data: {
-      isVerified: parsed.data.isVerified,
-      ...(parsed.data.isActive == null ? {} : { isActive: parsed.data.isActive })
-    }
+  const driver = await prisma.driverProfile.update({
+    where: { userId: body.userId },
+    data: { status: body.status }
   });
-  res.json({ profile: upd });
+  res.json({ ok: true, driver });
 });
 
-router.post('/documents/:id/status', async (req, res) => {
-  const id = String(req.params.id);
-  const schema = z.object({ status: z.enum(['PENDING', 'APPROVED', 'REJECTED']), note: z.string().optional().nullable() });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
-
-  const upd = await prisma.driverDocument.update({
-    where: { id },
-    data: { status: parsed.data.status, note: parsed.data.note ?? null }
-  });
-  res.json({ document: upd });
+router.get("/topups", requireAuth, requireAdmin, async (req, res) => {
+  const topups = await prisma.topUpRequest.findMany({ include: { user: true }, orderBy: { createdAt: "desc" }, take: 100 });
+  res.json({ topups });
 });
 
-router.get('/topups', async (_req, res) => {
-  const items = await prisma.topupRequest.findMany({ include: { user: true }, orderBy: { createdAt: 'desc' }, take: 200 });
-  res.json({ items });
-});
+router.post("/topups/decision", requireAuth, requireAdmin, async (req, res) => {
+  const body = z.object({ id: z.string(), decision: z.enum(["APPROVED","REJECTED"]) }).parse(req.body);
+  const t = await prisma.topUpRequest.update({ where: { id: body.id }, data: { status: body.decision } });
 
-router.post('/topups/:id/decision', async (req, res) => {
-  const id = String(req.params.id);
-  const schema = z.object({ status: z.enum(['APPROVED', 'REJECTED']), adminNote: z.string().optional().nullable() });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
-
-  const item = await prisma.topupRequest.findUnique({ where: { id } });
-  if (!item) return res.status(404).json({ error: 'Not found' });
-  if (item.status !== 'PENDING') return res.status(400).json({ error: 'Already processed' });
-
-  const upd = await prisma.topupRequest.update({ where: { id }, data: { status: parsed.data.status, adminNote: parsed.data.adminNote ?? null } });
-
-  if (parsed.data.status === 'APPROVED') {
-    // If user is driver, add to driver balance
-    const prof = await prisma.driverProfile.findUnique({ where: { userId: item.userId } });
+  if (body.decision === "APPROVED") {
+    // if driver has profile, add balance there; otherwise ignore
+    const prof = await prisma.driverProfile.findUnique({ where: { userId: t.userId } });
     if (prof) {
-      await prisma.driverProfile.update({ where: { userId: item.userId }, data: { balance: { increment: item.amountAzN } } });
+      await prisma.driverProfile.update({ where: { userId: t.userId }, data: { balance: { increment: t.amount } } });
     }
   }
-
-  res.json({ request: upd });
+  res.json({ ok: true, topup: t });
 });
 
-router.post('/settings', async (req, res) => {
-  const schema = z.object({
-    COMMISSION_RATE: z.string().optional(),
-    BASE_FARE_AZN: z.string().optional(),
-    INCLUDED_KM: z.string().optional(),
-    PER_KM_AZN: z.string().optional(),
-    DRIVER_BLOCK_BALANCE: z.string().optional(),
-    MIN_CAR_YEAR: z.string().optional(),
-    ALLOWED_CAR_COLORS: z.string().optional()
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+router.get("/settings", requireAuth, requireAdmin, async (req, res) => {
+  const settings = await prisma.setting.findMany();
+  res.json({ settings });
+});
 
-  for (const [k, v] of Object.entries(parsed.data)) {
-    if (v != null) await setSetting(k, v);
+router.post("/settings", requireAuth, requireAdmin, async (req, res) => {
+  const body = z.object({
+    commissionRate: z.number().optional(),
+    startFare: z.number().optional(),
+    freeKm: z.number().optional(),
+    perKmAfter: z.number().optional(),
+    driverMinBalance: z.number().optional(),
+    driverMinYear: z.number().optional()
+  }).parse(req.body);
+
+  const entries = Object.entries(body).filter(([,v]) => typeof v === "number");
+  for (const [key, v] of entries) {
+    await prisma.setting.upsert({ where: { key }, update: { value: String(v) }, create: { key, value: String(v) } });
   }
-  res.json({ ok: true, pricing: await getPricing() });
+  res.json({ ok: true });
 });
 
 export default router;

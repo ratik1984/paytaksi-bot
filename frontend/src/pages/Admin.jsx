@@ -1,157 +1,183 @@
-import React, { useEffect, useState } from 'react';
-import { api, API_BASE } from '../lib/api.js';
+import React, { useEffect, useState } from "react";
+import { api } from "../lib/api.js";
+
+const BASE = import.meta.env.VITE_API_BASE || "";
 
 export default function Admin() {
-  const [dash, setDash] = useState(null);
+  const [token, setToken] = useState(localStorage.getItem("pt_admin_token") || "");
+  const [login, setLogin] = useState("Ratik");
+  const [password, setPassword] = useState("0123456789");
+  const [msg, setMsg] = useState("");
+
   const [drivers, setDrivers] = useState([]);
-  const [topups, setTopups] = useState([]);
-  const [settings, setSettings] = useState({});
-  const [err, setErr] = useState('');
+  const [statusFilter, setStatusFilter] = useState("PENDING");
+  const [settings, setSettings] = useState([]);
 
-  async function loadAll() {
-    setErr('');
+  async function doLogin() {
+    setMsg("");
     try {
-      const d = await api('/admin/dashboard');
-      setDash(d);
-      setSettings(d.pricing ? {
-        COMMISSION_RATE: String(d.pricing.commissionRate),
-        BASE_FARE_AZN: String(d.pricing.base),
-        INCLUDED_KM: String(d.pricing.includedKm),
-        PER_KM_AZN: String(d.pricing.perKm),
-        DRIVER_BLOCK_BALANCE: String(d.pricing.blockBal),
-        MIN_CAR_YEAR: String(d.pricing.minCarYear),
-        ALLOWED_CAR_COLORS: d.pricing.allowedColors?.join(',')
-      } : {});
-
-      const dr = await api('/admin/drivers');
-      setDrivers(dr.items || []);
-
-      const tp = await api('/admin/topups');
-      setTopups(tp.items || []);
-    } catch (e) {
-      setErr(String(e.message || e));
+      const r = await api("/admin/login", { method:"POST", body: { login, password } });
+      localStorage.setItem("pt_admin_token", r.token);
+      setToken(r.token);
+    } catch {
+      setMsg("Login səhvdir.");
     }
   }
 
-  useEffect(() => { loadAll(); }, []);
+  async function loadDrivers() {
+    const r = await api(`/admin/drivers?status=${statusFilter}`, { token });
+    setDrivers(r.drivers || []);
+  }
+
+  async function loadSettings() {
+    const r = await api("/admin/settings", { token });
+    setSettings(r.settings || []);
+  }
+
+  useEffect(() => {
+    if (token) { loadDrivers().catch(()=>{}); loadSettings().catch(()=>{}); }
+  }, [token, statusFilter]);
+
+  async function setDriverStatus(userId, status) {
+    await api("/admin/drivers/status", { method:"POST", token, body: { userId, status } });
+    await loadDrivers();
+  }
+
+  function sVal(key, def="") {
+    return (settings.find(s=>s.key===key)?.value) ?? def;
+  }
+
+  const [form, setForm] = useState({
+    commissionRate: 0.10, startFare: 3.5, freeKm: 3.0, perKmAfter: 0.40, driverMinBalance: -10, driverMinYear: 2010
+  });
+
+  useEffect(() => {
+    if (!settings.length) return;
+    setForm({
+      commissionRate: Number(sVal("commissionRate","0.1")),
+      startFare: Number(sVal("startFare","3.5")),
+      freeKm: Number(sVal("freeKm","3")),
+      perKmAfter: Number(sVal("perKmAfter","0.4")),
+      driverMinBalance: Number(sVal("driverMinBalance","-10")),
+      driverMinYear: Number(sVal("driverMinYear","2010"))
+    });
+  }, [settings.length]);
 
   async function saveSettings() {
-    try {
-      await api('/admin/settings', { method: 'POST', body: settings });
-      alert('Saxlandı');
-      await loadAll();
-    } catch (e) {
-      setErr(String(e.message || e));
-    }
+    await api("/admin/settings", { method:"POST", token, body: {
+      commissionRate: Number(form.commissionRate),
+      startFare: Number(form.startFare),
+      freeKm: Number(form.freeKm),
+      perKmAfter: Number(form.perKmAfter),
+      driverMinBalance: Number(form.driverMinBalance),
+      driverMinYear: Number(form.driverMinYear)
+    }});
+    await loadSettings();
+    setMsg("Setting-lər yadda saxlandı.");
+  }
+
+  if (!token) {
+    return (
+      <div className="card">
+        <div className="h1">Admin giriş</div>
+        <div className="row">
+          <div className="col">
+            <label className="muted">Login</label>
+            <input value={login} onChange={(e)=>setLogin(e.target.value)} />
+          </div>
+          <div className="col">
+            <label className="muted">Parol</label>
+            <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} />
+          </div>
+        </div>
+        <button onClick={doLogin}>Daxil ol</button>
+        {msg && <div className="muted" style={{marginTop:10}}>{msg}</div>}
+      </div>
+    );
   }
 
   return (
-    <div>
+    <>
       <div className="card">
-        <div className="h1">Admin Panel</div>
-        {err && <div className="card">⚠️ {err}</div>}
-        {!dash ? <small>Yüklənir…</small> : (
-          <div className="row">
-            <span className="badge">Users: {dash.users}</span>
-            <span className="badge">Drivers: {dash.drivers}</span>
-            <span className="badge">Rides: {dash.rides}</span>
-            <span className="badge">Topups: {dash.topups}</span>
-          </div>
-        )}
-        <button onClick={loadAll}>Yenilə</button>
-      </div>
-
-      <div className="card">
-        <div className="h1">Settings</div>
-        <small>Komissiya, qiymətlər, min il və rənglər buradan dəyişir.</small>
+        <div className="h1">Admin panel</div>
         <div className="row">
-          <Field label="Komissiya (0.10)" value={settings.COMMISSION_RATE} onChange={(v)=>setSettings({...settings, COMMISSION_RATE:v})} />
-          <Field label="Start fare" value={settings.BASE_FARE_AZN} onChange={(v)=>setSettings({...settings, BASE_FARE_AZN:v})} />
-          <Field label="Included km" value={settings.INCLUDED_KM} onChange={(v)=>setSettings({...settings, INCLUDED_KM:v})} />
-          <Field label="Per km" value={settings.PER_KM_AZN} onChange={(v)=>setSettings({...settings, PER_KM_AZN:v})} />
-          <Field label="Driver block balance" value={settings.DRIVER_BLOCK_BALANCE} onChange={(v)=>setSettings({...settings, DRIVER_BLOCK_BALANCE:v})} />
-          <Field label="Min car year" value={settings.MIN_CAR_YEAR} onChange={(v)=>setSettings({...settings, MIN_CAR_YEAR:v})} />
-          <Field label="Allowed colors (csv)" value={settings.ALLOWED_CAR_COLORS} onChange={(v)=>setSettings({...settings, ALLOWED_CAR_COLORS:v})} />
+          <div className="col">
+            <label className="muted">Sürücü status filter</label>
+            <select value={statusFilter} onChange={(e)=>setStatusFilter(e.target.value)}>
+              <option value="PENDING">PENDING</option>
+              <option value="APPROVED">APPROVED</option>
+              <option value="REJECTED">REJECTED</option>
+            </select>
+          </div>
+          <div className="col">
+            <button onClick={()=>{localStorage.removeItem("pt_admin_token"); setToken("");}}>Çıxış</button>
+          </div>
         </div>
-        <button className="primary" onClick={saveSettings}>Saxla</button>
+        {msg && <div className="muted" style={{marginTop:10}}>{msg}</div>}
       </div>
 
       <div className="card">
-        <div className="h1">Sürücülər</div>
-        {drivers.length === 0 ? <small>—</small> : drivers.map((d) => (
-          <div className="card" key={d.id}>
-            <div className="row">
-              <span className="badge">{d.user?.name || 'Driver'}</span>
-              <span className="badge">{d.carYear} / {d.carColor}</span>
-              <span className="badge">Balans: {d.balance} AZN</span>
-              <span className="badge">Verified: {String(d.isVerified)}</span>
-              <span className="badge">Active: {String(d.isActive)}</span>
-            </div>
-            <div className="row">
-              <button onClick={async () => {
-                await api(`/admin/drivers/${d.id}/verify`, { method: 'POST', body: { isVerified: !d.isVerified, isActive: d.isActive } });
-                await loadAll();
-              }}>{d.isVerified ? 'Verify ləğv' : 'Verify et'}</button>
-              <button onClick={async () => {
-                await api(`/admin/drivers/${d.id}/verify`, { method: 'POST', body: { isVerified: d.isVerified, isActive: !d.isActive } });
-                await loadAll();
-              }}>{d.isActive ? 'Deaktiv et' : 'Aktiv et'}</button>
-            </div>
-
-            <div className="hr" />
-            <small>Sənədlər:</small>
-            {(d.documents || []).map((doc) => (
-              <div key={doc.id} className="card">
-                <div className="row">
-                  <span className="badge">{doc.type}</span>
-                  <span className="badge">{doc.status}</span>
-                </div>
-                <a href={`${API_BASE}/${doc.filePath}`} target="_blank" rel="noreferrer">Faylı aç</a>
-                <div className="row">
-                  <button onClick={async () => {
-                    await api(`/admin/documents/${doc.id}/status`, { method: 'POST', body: { status: 'APPROVED' } });
-                    await loadAll();
-                  }}>Approve</button>
-                  <button onClick={async () => {
-                    await api(`/admin/documents/${doc.id}/status`, { method: 'POST', body: { status: 'REJECTED', note: 'Yenidən yükləyin' } });
-                    await loadAll();
-                  }}>Reject</button>
+        <div className="h1">Sürücülər ({drivers.length})</div>
+        {drivers.length === 0 ? <div className="muted">Boşdur.</div> : (
+          <div className="list">
+            {drivers.map(d => (
+              <div key={d.id} className="item">
+                <b>{d.user?.name || d.user?.username || d.userId}</b>
+                <div className="muted">İl: {d.carYear} • rəng: {d.carColor} • balans: {Number(d.balance||0).toFixed(2)}</div>
+                <div className="muted">Docs: {d.documents?.length || 0}</div>
+                {d.documents?.length ? (
+                  <div className="muted" style={{marginTop:6}}>
+                    {d.documents.map(doc => (
+                      <a key={doc.id} href={BASE + doc.path} target="_blank" rel="noreferrer" className="badge">
+                        {doc.type}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="row" style={{marginTop:10}}>
+                  <div className="col"><button onClick={()=>setDriverStatus(d.userId,"APPROVED")}>Approve</button></div>
+                  <div className="col"><button onClick={()=>setDriverStatus(d.userId,"REJECTED")} style={{background:"linear-gradient(180deg,#8b3b3b,#5c1a1a)"}}>Reject</button></div>
                 </div>
               </div>
             ))}
           </div>
-        ))}
+        )}
       </div>
 
       <div className="card">
-        <div className="h1">Top-up sorğuları</div>
-        {topups.length === 0 ? <small>—</small> : topups.map((t) => (
-          <div className="card" key={t.id}>
-            <div className="row">
-              <span className="badge">{t.status}</span>
-              <span className="badge">{t.method}</span>
-              <span className="badge">{t.amountAzN} AZN</span>
-              <span className="badge">{t.user?.name || t.userId}</span>
-            </div>
-            <small>{t.note || ''}</small>
-            {t.status === 'PENDING' && (
-              <div className="row">
-                <button className="primary" onClick={async () => { await api(`/admin/topups/${t.id}/decision`, { method: 'POST', body: { status: 'APPROVED' } }); await loadAll(); }}>Approve</button>
-                <button onClick={async () => { await api(`/admin/topups/${t.id}/decision`, { method: 'POST', body: { status: 'REJECTED', adminNote: 'Uyğun deyil' } }); await loadAll(); }}>Reject</button>
-              </div>
-            )}
+        <div className="h1">Setting-lər</div>
+        <div className="row">
+          <div className="col">
+            <label className="muted">Komissiya (0.10)</label>
+            <input type="number" step="0.01" value={form.commissionRate} onChange={(e)=>setForm(f=>({...f, commissionRate: e.target.value}))} />
           </div>
-        ))}
+          <div className="col">
+            <label className="muted">Start (AZN)</label>
+            <input type="number" step="0.01" value={form.startFare} onChange={(e)=>setForm(f=>({...f, startFare: e.target.value}))} />
+          </div>
+        </div>
+        <div className="row">
+          <div className="col">
+            <label className="muted">3 km limit</label>
+            <input type="number" step="0.1" value={form.freeKm} onChange={(e)=>setForm(f=>({...f, freeKm: e.target.value}))} />
+          </div>
+          <div className="col">
+            <label className="muted">Sonra AZN/km</label>
+            <input type="number" step="0.01" value={form.perKmAfter} onChange={(e)=>setForm(f=>({...f, perKmAfter: e.target.value}))} />
+          </div>
+        </div>
+        <div className="row">
+          <div className="col">
+            <label className="muted">Min balans</label>
+            <input type="number" step="0.01" value={form.driverMinBalance} onChange={(e)=>setForm(f=>({...f, driverMinBalance: e.target.value}))} />
+          </div>
+          <div className="col">
+            <label className="muted">Min il</label>
+            <input type="number" value={form.driverMinYear} onChange={(e)=>setForm(f=>({...f, driverMinYear: e.target.value}))} />
+          </div>
+        </div>
+        <button onClick={saveSettings}>Yadda saxla</button>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, value, onChange }) {
-  return (
-    <div style={{ flex: 1, minWidth: 220 }}>
-      <small>{label}</small>
-      <input value={value || ''} onChange={(e) => onChange(e.target.value)} />
-    </div>
+    </>
   );
 }

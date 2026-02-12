@@ -13,131 +13,129 @@ enum UserRole {
   ADMIN
 }
 
-enum RideStatus {
-  REQUESTED
-  ASSIGNED
-  ARRIVED
-  STARTED
-  COMPLETED
-  CANCELED
-}
-
-enum TopupMethod {
-  CARD_TO_CARD
-  M10
-}
-
-enum DocType {
-  ID_FRONT
-  ID_BACK
-  LICENSE_FRONT
-  LICENSE_BACK
-  CAR_REG_FRONT
-  CAR_REG_BACK
-}
-
-enum DocStatus {
+enum DriverStatus {
   PENDING
   APPROVED
   REJECTED
 }
 
+enum RideStatus {
+  REQUESTED
+  OFFERED
+  ACCEPTED
+  ARRIVED
+  IN_RIDE
+  COMPLETED
+  CANCELED
+}
+
 model User {
-  id              String   @id @default(cuid())
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id            String   @id @default(cuid())
+  telegramId    String?  @unique
+  name          String?
+  username      String?
+  phone         String?
+  role          UserRole @default(PASSENGER)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  telegramId      String?  @unique
-  phone           String?  @unique
-  name            String?
-  role            UserRole @default(PASSENGER)
-
-  passwordHash    String?
-
-  driverProfile   DriverProfile?
+  driverProfile DriverProfile?
   ridesAsPassenger Ride[] @relation("PassengerRides")
   ridesAsDriver    Ride[] @relation("DriverRides")
+  topups         TopUpRequest[]
+}
 
-  topups          TopupRequest[]
+model AdminUser {
+  id        String   @id @default(cuid())
+  login     String   @unique
+  passHash  String
+  createdAt DateTime @default(now())
 }
 
 model DriverProfile {
-  id           String    @id @default(cuid())
-  userId       String    @unique
-  user         User      @relation(fields: [userId], references: [id])
+  id            String       @id @default(cuid())
+  userId        String       @unique
+  status        DriverStatus @default(PENDING)
+  carYear       Int
+  carColor      String
+  carModel      String?
+  carPlate      String?
+  balance       Float        @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
-  carMake      String?
-  carModel     String?
-  carYear      Int
-  carPlate     String?
-  carColor     String
-
-  balance      Decimal   @default(0.0)
-  isActive     Boolean   @default(true)
-  isVerified   Boolean   @default(false)
-
-  lastLat      Float?
-  lastLng      Float?
-  lastSeenAt   DateTime?
-
-  documents    DriverDocument[]
+  user          User         @relation(fields: [userId], references: [id])
+  documents     DriverDocument[]
+  locations     DriverLocation[]
 }
 
 model DriverDocument {
-  id         String    @id @default(cuid())
-  driverId   String
-  driver     DriverProfile @relation(fields: [driverId], references: [id])
-  type       DocType
-  filePath   String
-  status     DocStatus @default(PENDING)
-  note       String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  driverId  String
+  type      String   // id_front, id_back, dl_front, dl_back, tp_front, tp_back
+  path      String
+  createdAt DateTime @default(now())
 
-  @@unique([driverId, type])
+  driver    DriverProfile @relation(fields: [driverId], references: [id])
+
+  @@index([driverId])
+}
+
+model DriverLocation {
+  id        String   @id @default(cuid())
+  driverId  String
+  lat       Float
+  lng       Float
+  heading   Float?
+  speed     Float?
+  createdAt DateTime @default(now())
+
+  driver    DriverProfile @relation(fields: [driverId], references: [id])
+
+  @@index([driverId, createdAt])
 }
 
 model Ride {
-  id            String     @id @default(cuid())
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id           String     @id @default(cuid())
+  passengerId  String
+  driverId     String?
+  status       RideStatus @default(REQUESTED)
 
-  passengerId   String
-  passenger     User       @relation("PassengerRides", fields: [passengerId], references: [id])
+  pickupLat    Float
+  pickupLng    Float
+  pickupText   String?
+  dropLat      Float
+  dropLng      Float
+  dropText     String?
 
-  driverId      String?
-  driver        User?      @relation("DriverRides", fields: [driverId], references: [id])
-
-  pickupLat     Float
-  pickupLng     Float
-  pickupText    String?
-
-  dropoffLat    Float
-  dropoffLng    Float
-  dropoffText   String?
-
-  distanceKm    Float?
-  fareAzN       Float?
+  distanceKm   Float?
+  fareAzN      Float?
   commissionAzN Float?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
 
-  status        RideStatus @default(REQUESTED)
-}
+  passenger    User       @relation("PassengerRides", fields: [passengerId], references: [id])
+  driver       User?      @relation("DriverRides", fields: [driverId], references: [id])
 
-model TopupRequest {
-  id          String     @id @default(cuid())
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-
-  userId      String
-  user        User       @relation(fields: [userId], references: [id])
-
-  method      TopupMethod
-  amountAzN   Float
-  note        String?
-  status      String     @default("PENDING")
-  adminNote   String?
+  @@index([passengerId, createdAt])
+  @@index([driverId, createdAt])
 }
 
 model Setting {
-  key         String  @id
-  value       String
+  key   String @id
+  value String
+}
+
+model TopUpRequest {
+  id        String   @id @default(cuid())
+  userId    String
+  method    String   // card2card | m10
+  amount    Float
+  note      String?
+  status    String   @default("PENDING") // PENDING/APPROVED/REJECTED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id])
+  @@index([userId, createdAt])
 }

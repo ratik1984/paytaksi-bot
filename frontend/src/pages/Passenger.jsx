@@ -1,150 +1,200 @@
-import React, { useEffect, useState } from 'react';
-import { api } from '../lib/api.js';
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import L from "leaflet";
+import iconRetinaUrl from "leaflet/dist/images/marker-icon-2x.png";
+import iconUrl from "leaflet/dist/images/marker-icon.png";
+import shadowUrl from "leaflet/dist/images/marker-shadow.png";
+
+import { api, getToken, setToken } from "../lib/api.js";
+import { getTgUser } from "../lib/telegram.js";
+import { getSocket } from "../lib/socket.js";
+
+L.Icon.Default.mergeOptions({ iconRetinaUrl, iconUrl, shadowUrl });
+
+function useDebounced(value, ms=500) {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
 
 export default function Passenger() {
-  const [loc, setLoc] = useState(null);
-  const [q, setQ] = useState('');
-  const [suggestions, setSuggestions] = useState([]);
-  const [dest, setDest] = useState(null);
-  const [rides, setRides] = useState([]);
-  const [err, setErr] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [token, setTokState] = useState(getToken());
+  const [me, setMe] = useState(null);
 
-  useEffect(() => {
-    navigator.geolocation?.getCurrentPosition(
-      (p) => setLoc({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      (e) => setErr('GPS icazəsi verilmədi: ' + e.message),
-      { enableHighAccuracy: true, timeout: 15000 }
-    );
-  }, []);
+  const [pos, setPos] = useState(null); // {lat,lng}
+  const [posName, setPosName] = useState("");
+  const [drop, setDrop] = useState(null);
+  const [dropText, setDropText] = useState("");
+  const [suggest, setSuggest] = useState([]);
+  const deb = useDebounced(dropText, 450);
 
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      if (q.trim().length < 3) return setSuggestions([]);
-      try {
-        const r = await api(`/places/search?q=${encodeURIComponent(q.trim())}`, { auth: false });
-        setSuggestions(r.items || []);
-      } catch {
-        setSuggestions([]);
-      }
-    }, 350);
-    return () => clearTimeout(t);
-  }, [q]);
+  const [ride, setRide] = useState(null);
+  const [status, setStatus] = useState("");
+  const socketRef = useRef(null);
 
-  async function refreshRides() {
-    const r = await api('/rides/me');
-    setRides(r.rides || []);
+  const poly = useMemo(() => {
+    if (!pos || !drop) return null;
+    return [[pos.lat, pos.lng], [drop.lat, drop.lng]];
+  }, [pos, drop]);
+
+  async function ensureLogin() {
+    const tg = getTgUser() || { id: "demo_passenger", first_name: "Demo", last_name: "Passenger", username: "demo" };
+    const r = await api("/auth/telegram", { method:"POST", body: { user: tg, role: "PASSENGER" } });
+    setToken(r.token);
+    setTokState(r.token);
+    setMe(r.user);
   }
 
+  useEffect(() => { if (!token) ensureLogin().catch(()=>{}); }, []);
   useEffect(() => {
-    refreshRides().catch(() => {});
+    if (!token) return;
+    socketRef.current = getSocket();
+    socketRef.current.emit("join", { role: "PASSENGER", userId: me?.id || "" });
+    socketRef.current.on("ride_update", (p) => {
+      if (p?.ride) { setRide(p.ride); setStatus(p.status); }
+    });
+    return () => {
+      try { socketRef.current?.off("ride_update"); } catch {}
+    };
+  }, [token, me?.id]);
+
+  // get gps
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(async (p) => {
+      const lat = p.coords.latitude;
+      const lng = p.coords.longitude;
+      setPos({ lat, lng });
+      // reverse
+      try {
+        const rev = await api(`/geo/reverse?lat=${lat}&lng=${lng}`);
+        const name = rev?.features?.[0]?.properties?.name
+          || rev?.features?.[0]?.properties?.street
+          || rev?.features?.[0]?.properties?.city
+          || rev?.features?.[0]?.properties?.country
+          || "Cari yer";
+        const full = rev?.features?.[0]?.properties?.name
+          ? rev.features[0].properties.name
+          : (rev?.features?.[0]?.properties?.street || "Cari yer");
+        setPosName(rev?.features?.[0]?.properties?.name || rev?.features?.[0]?.properties?.street || rev?.features?.[0]?.properties?.city || "Cari yer");
+      } catch {
+        setPosName(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+      }
+    }, () => {}, { enableHighAccuracy: true, timeout: 10000 });
   }, []);
 
+  // search suggestions
+  useEffect(() => {
+    let stop = false;
+    (async () => {
+      if (!deb || deb.length < 3) { setSuggest([]); return; }
+      try {
+        const lat = pos?.lat;
+        const lng = pos?.lng;
+        const s = await api(`/geo/search?q=${encodeURIComponent(deb)}${lat && lng ? `&lat=${lat}&lng=${lng}` : ""}`);
+        const features = (s?.features || []).map(f => ({
+          label: f.properties?.name || f.properties?.street || f.properties?.city || "Yer",
+          city: f.properties?.city || "",
+          country: f.properties?.country || "",
+          lat: f.geometry?.coordinates?.[1],
+          lng: f.geometry?.coordinates?.[0]
+        })).filter(x => Number.isFinite(x.lat) && Number.isFinite(x.lng));
+        if (!stop) setSuggest(features);
+      } catch {
+        if (!stop) setSuggest([]);
+      }
+    })();
+    return () => { stop = true; };
+  }, [deb, pos?.lat, pos?.lng]);
+
   async function createRide() {
-    setErr('');
-    if (!loc) return setErr('GPS lazım...');
-    if (!dest) return setErr('Gedəcəyiniz yeri seçin');
-    setLoading(true);
-    try {
-      const r = await api('/rides', {
-        method: 'POST',
-        body: {
-          pickupLat: loc.lat,
-          pickupLng: loc.lng,
-          pickupText: 'Cari yer',
-          dropoffLat: dest.lat,
-          dropoffLng: dest.lng,
-          dropoffText: dest.display
-        }
-      });
-      await refreshRides();
-      setDest(null);
-      setQ('');
-      setSuggestions([]);
-      alert('Sifariş yaradıldı');
-    } catch (e) {
-      setErr(String(e.message || e));
-    } finally {
-      setLoading(false);
-    }
+    if (!pos || !drop) return;
+    const r = await api("/rides/create", {
+      method: "POST",
+      token,
+      body: {
+        pickupLat: pos.lat,
+        pickupLng: pos.lng,
+        pickupText: posName || "Cari yer",
+        dropLat: drop.lat,
+        dropLng: drop.lng,
+        dropText: drop.label || ""
+      }
+    });
+    setRide(r.ride);
+    setStatus(r.ride.status);
   }
 
   return (
-    <div>
+    <>
       <div className="card">
         <div className="h1">Sərnişin</div>
-        {err && <div className="card">⚠️ {err}</div>}
+        <div className="muted">Cari yer: <b style={{color:"var(--text)"}}>{posName || "..."}</b></div>
+      </div>
+
+      <div className="card">
         <div className="row">
-          <div style={{ flex: 1, minWidth: 220 }}>
-            <small>Cari yer:</small>
-            <div>{loc ? `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}` : 'tapılır…'}</div>
-          </div>
-          <div style={{ flex: 2, minWidth: 260 }}>
-            <small>Gedəcəyiniz yer</small>
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Məs: 28 May, Gənclik, Nizami..." />
-            {suggestions.length > 0 && (
-              <div className="card">
-                <small>Alternativ yaxın yerlər:</small>
-                {suggestions.map((s, i) => (
-                  <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,.08)' }}>
-                    <button
-                      onClick={() => {
-                        setDest(s);
-                        setQ(s.display);
-                        setSuggestions([]);
-                      }}
-                    >
-                      {s.display}
-                    </button>
+          <div className="col">
+            <label className="muted">Gedəcəyiniz yer</label>
+            <input value={dropText} onChange={(e)=>setDropText(e.target.value)} placeholder="Məs: Nizami m., 28 May, Bakı..." />
+            {suggest.length > 0 && (
+              <div className="list" style={{marginTop:8}}>
+                {suggest.map((s, i) => (
+                  <div key={i} className="item" onClick={()=>{
+                    setDrop({ lat: s.lat, lng: s.lng, label: s.label });
+                    setDropText(`${s.label}${s.city?`, ${s.city}`:""}`);
+                    setSuggest([]);
+                  }} style={{cursor:"pointer"}}>
+                    <b>{s.label}</b> <small>{[s.city, s.country].filter(Boolean).join(", ")}</small>
                   </div>
                 ))}
               </div>
             )}
-            {dest && (
-              <small>
-                Seçildi: <b>{dest.display}</b>
-              </small>
-            )}
+            <div style={{height:10}} />
+            <button onClick={createRide} disabled={!pos || !drop || !token}>Sifariş yarat</button>
+          </div>
+          <div className="col">
+            <div className="mapWrap">
+              <MapContainer center={pos ? [pos.lat, pos.lng] : [40.4093, 49.8671]} zoom={13} style={{height:"100%", width:"100%"}}>
+                <TileLayer
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  attribution="&copy; OpenStreetMap contributors"
+                />
+                {pos && <Marker position={[pos.lat, pos.lng]}><Popup>Cari yer</Popup></Marker>}
+                {drop && <Marker position={[drop.lat, drop.lng]}><Popup>Gediləcək yer</Popup></Marker>}
+                {poly && <Polyline positions={poly} />}
+              </MapContainer>
+            </div>
           </div>
         </div>
-        <div className="hr" />
-        <button className="primary" disabled={loading} onClick={createRide}>
-          Sifariş et
-        </button>
       </div>
 
       <div className="card">
-        <div className="h1">Mənim sifarişlərim</div>
-        <button onClick={refreshRides}>Yenilə</button>
-        {rides.length === 0 ? (
-          <small>Hələ sifariş yoxdur.</small>
-        ) : (
-          rides.map((r) => (
-            <div className="card" key={r.id}>
-              <div className="row">
-                <span className="badge">{r.status}</span>
-                <span className="badge">{r.fareAzN} AZN</span>
-                <span className="badge">{r.distanceKm} km</span>
+        <div className="h1">Sifariş statusu</div>
+        {ride ? (
+          <>
+            <div className="row">
+              <div className="col">
+                <span className="badge ok">#{ride.id.slice(0,6)}</span>
+                <span className="badge">{status}</span>
               </div>
-              <small>{new Date(r.createdAt).toLocaleString()}</small>
-              <div style={{ marginTop: 8 }}>
-                <div><small>Haradan:</small> {r.pickupText || '—'}</div>
-                <div><small>Haraya:</small> {r.dropoffText || '—'}</div>
-                {r.status === 'REQUESTED' && (
-                  <button
-                    onClick={async () => {
-                      await api(`/rides/${r.id}/cancel`, { method: 'POST' });
-                      await refreshRides();
-                    }}
-                  >
-                    Ləğv et
-                  </button>
-                )}
+              <div className="col">
+                <div className="muted">Məsafə: <b style={{color:"var(--text)"}}>{(ride.distanceKm||0).toFixed(2)} km</b></div>
+                <div className="muted">Qiymət: <b style={{color:"var(--text)"}}>{(ride.fareAzN||0).toFixed(2)} AZN</b></div>
               </div>
             </div>
-          ))
+            <hr />
+            <div className="muted">Götürmə: {ride.pickupText || "-"}</div>
+            <div className="muted">Çatdırılma: {ride.dropText || "-"}</div>
+          </>
+        ) : (
+          <div className="muted">Hələ sifariş yoxdur.</div>
         )}
       </div>
-    </div>
+    </>
   );
 }

@@ -1,36 +1,29 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000';
+const BASE = import.meta.env.VITE_API_BASE || "";
 
 export function getToken() {
-  return localStorage.getItem('paytaksi_token');
+  return localStorage.getItem("pt_token") || "";
 }
 
 export function setToken(t) {
-  if (!t) localStorage.removeItem('paytaksi_token');
-  else localStorage.setItem('paytaksi_token', t);
+  if (t) localStorage.setItem("pt_token", t);
 }
 
-export async function api(path, { method='GET', body, auth=true } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (auth) {
-    const t = getToken();
-    if (t) headers.Authorization = `Bearer ${t}`;
+export function clearToken() {
+  localStorage.removeItem("pt_token");
+  localStorage.removeItem("pt_role");
+}
+
+export async function api(path, { method="GET", body=null, token=null, headers={} } = {}) {
+  const h = { ...headers };
+  if (token) h["Authorization"] = "Bearer " + token;
+  if (body && !(body instanceof FormData)) {
+    h["Content-Type"] = "application/json";
+    body = JSON.stringify(body);
   }
-  const r = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || 'Request failed');
-  return data;
-}
-
-export async function apiForm(path, formData, { method='POST' } = {}) {
-  const headers = {};
-  const t = getToken();
-  if (t) headers.Authorization = `Bearer ${t}`;
-  const r = await fetch(`${API_BASE}${path}`, { method, headers, body: formData });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || 'Request failed');
+  const res = await fetch(BASE + path, { method, headers: h, body });
+  const txt = await res.text();
+  let data;
+  try { data = txt ? JSON.parse(txt) : {}; } catch { data = { raw: txt }; }
+  if (!res.ok) throw Object.assign(new Error("API error"), { status: res.status, data });
   return data;
 }

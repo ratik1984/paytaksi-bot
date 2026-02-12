@@ -1,21 +1,25 @@
-import WebApp from '@twa-dev/sdk';
-
-export function getInitData() {
-  try {
-    return WebApp.initData || '';
-  } catch {
-    return '';
-  }
-}
+import WebApp from "@twa-dev/sdk";
 
 export function getTgUser() {
   try {
-    return WebApp.initDataUnsafe?.user || null;
+    const wa = WebApp;
+    wa.ready();
+    wa.expand();
+    const u = wa.initDataUnsafe?.user;
+    if (!u) return null;
+    return {
+      id: u.id,
+      first_name: u.first_name,
+      last_name: u.last_name,
+      username: u.username
+    };
   } catch {
     return null;
   }
 }
 
-export function expand() {
-  try { WebApp.expand(); } catch {}
+export function isTelegram() {
+  try {
+    return !!WebApp?.initDataUnsafe;
+  } catch { return false; }
 }
