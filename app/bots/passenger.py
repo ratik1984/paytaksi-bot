@@ -18,12 +18,12 @@ STATE_DEST_CHOSEN = "dest_chosen"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text(
-        "Salam! PayTaksi sərnişin botuna xoş gəldin.
-"
-        "Zəhmət olmasa, *lokasiyanı* paylaş (📎 → Location).",
-        parse_mode="Markdown"
-    )
+await update.message.reply_text(
+    "Salam! PayTaksi sərnişin botuna xoş gəldin.\n"
+    "Zəhmət olmasa, *lokasiyanı* paylaş (📎 → Location).",
+    parse_mode="Markdown"
+)
+
     context.user_data["state"] = STATE_PICKUP
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
