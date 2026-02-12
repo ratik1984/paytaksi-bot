@@ -1,8 +1,9 @@
 from __future__ import annotations
 import asyncio
 from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from fastapi.templating import Jinja2Templates
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -31,12 +32,9 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False)
 app.include_router(admin_router)
 app.include_router(webapp_router)
 
-# Static files for Mini App
-BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
+# ---- Static / Templates (Telegram Mini App) ----
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+templates = Jinja2Templates(directory="app/templates")
 
 # ---- DB init ----
 Base.metadata.create_all(bind=engine)
