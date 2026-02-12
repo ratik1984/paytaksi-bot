@@ -1,7 +1,0 @@
-<% const body = `
-<div class="card"><h2>Orders — ${status}</h2>
-<table><thead><tr><th>ID</th><th>Status</th><th>Fare</th><th>Commission</th><th>Distance</th><th>Created</th></tr></thead>
-<tbody>
-${orders.map(o => `<tr><td>#${o.id}</td><td><span class="pill">${o.status}</span></td><td>${o.fare.toFixed(2)} AZN</td><td>${o.commission.toFixed(2)} AZN</td><td>${o.distanceKm.toFixed(2)} km</td><td>${new Date(o.createdAt).toLocaleString()}</td></tr>`).join("")}
-</tbody></table></div>
-`; %><%- include("_layout", { body }) %>
