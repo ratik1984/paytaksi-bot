@@ -3,428 +3,144 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PayTaksi</title>
+  <title>PayTaksi WebApp</title>
+
+  <!-- Telegram WebApp SDK (mütləq) -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:0; background:#0b0f19; color:#fff}
-    .wrap{max-width:920px;margin:0 auto;padding:20px}
-    .card{background:#121a2a;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin:12px 0}
-    input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0b1222;color:#fff;margin-top:8px}
-    button{background:#2b6cff;border:none;font-weight:700;cursor:pointer}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .muted{color:rgba(255,255,255,.7);font-size:14px}
-    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
-    .btn2{background:#1e2a44}
-    .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-    a{color:#8ab4ff}
-    .offer{border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:12px; margin:10px 0}
-    .warn{background:rgba(255,107,107,.12);border:1px solid rgba(255,107,107,.35)}
+    body{font-family:system-ui,Arial;margin:0;background:#0b1220;color:#fff}
+    .wrap{max-width:720px;margin:0 auto;padding:16px}
+    .card{background:#121a2a;border:1px solid #23314d;border-radius:16px;padding:16px;margin:12px 0}
+    .muted{opacity:.75}
+    input{width:100%;padding:12px;border-radius:12px;border:1px solid #2c3a58;background:#0b1220;color:#fff}
+    button{width:100%;padding:14px;border-radius:14px;border:0;background:#2f6bff;color:#fff;font-weight:700}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#1c2942;border:1px solid #2c3a58}
+    .top{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   </style>
-  <script>
-    let tg = null;
-    let mode = "passenger";
-    let me = {id:null, username:null};
-    let watchId = null;
-    let lastRideId = null;
-
-    function qs(){
-      return new URLSearchParams(location.search);
-    }
-
-    function initTG(){
-      tg = window.Telegram && window.Telegram.WebApp;
-      if (tg) {
-        tg.ready(); tg.expand();
-        const u = tg.initDataUnsafe && tg.initDataUnsafe.user;
-        if (u) { me.id = u.id; me.username = u.username || (u.first_name||""); }
-      }
-    }
-
-    function loadFallbackIdentity(){
-      const p = qs();
-      const tid = p.get("tid") || localStorage.getItem("paytaksi_tid");
-      const uname = p.get("username") || localStorage.getItem("paytaksi_username");
-      if (tid) me.id = Number(tid);
-      if (uname) me.username = uname;
-    }
-
-    function showIdentityBoxIfNeeded(){
-      const box = document.getElementById("identityBox");
-      if (!me.id){
-        box.style.display = "block";
-      } else {
-        box.style.display = "none";
-      }
-      document.getElementById("tgid").textContent = me.id ? String(me.id) : "unknown";
-    }
-
-    function saveIdentity(){
-      const tid = document.getElementById("manual_tid").value.trim();
-      const uname = document.getElementById("manual_username").value.trim();
-      if (!tid) return alert("Telegram ID yaz");
-      localStorage.setItem("paytaksi_tid", tid);
-      localStorage.setItem("paytaksi_username", uname);
-      me.id = Number(tid);
-      me.username = uname;
-      showIdentityBoxIfNeeded();
-      setMode();
-      alert("OK. İndi davam et.");
-    }
-
-    function setMode(){
-      const params = qs();
-      mode = params.get("from") || "passenger";
-      document.getElementById("mode").textContent = mode;
-      document.getElementById("tgid").textContent = me.id ? String(me.id) : "unknown";
-      document.getElementById("passengerBox").style.display = mode==="passenger" ? "block":"none";
-      document.getElementById("driverBox").style.display = mode==="driver" ? "block":"none";
-      // Warning if not in Telegram
-      document.getElementById("tgWarn").style.display = (window.Telegram && window.Telegram.WebApp && me.id) ? "none" : "block";
-    }
-
-    async function detectLocationInto(inputId) {
-      const out = document.getElementById(inputId);
-      out.value = "Yer müəyyən edilir...";
-      if (!navigator.geolocation) { out.value = ""; alert("Geolocation dəstəklənmir"); return; }
-      navigator.geolocation.getCurrentPosition((pos) => {
-        const {latitude, longitude} = pos.coords;
-        out.value = latitude.toFixed(6) + "," + longitude.toFixed(6);
-      }, () => { out.value=""; alert("Location icazəsi verilmədi"); }, {enableHighAccuracy:true, timeout:10000});
-    }
-
-    async function autocomplete() {
-      const q = document.getElementById("dropoff").value.trim();
-      if (q.length < 3) return;
-      const res = await fetch("/api/places?q=" + encodeURIComponent(q));
-      const data = await res.json();
-      const list = document.getElementById("suggestions");
-      list.innerHTML = "";
-      (data.results || []).slice(0,6).forEach(p => {
-        const opt = document.createElement("div");
-        opt.className = "pill";
-        opt.style.marginRight = "8px";
-        opt.style.marginBottom = "8px";
-        opt.style.cursor = "pointer";
-        opt.textContent = p.display_name;
-        opt.onclick = () => { document.getElementById("dropoff").value = p.display_name; };
-        list.appendChild(opt);
-      });
-    }
-
-    async function createRide() {
-      const pickup = document.getElementById("pickup").value.trim();
-      const dropoff = document.getElementById("dropoff").value.trim();
-      if (!pickup || !dropoff) { alert("Pick-up və drop-off doldurun"); return; }
-      const res = await fetch("/api/rides", {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({pickup, dropoff, telegram_id: me.id})
-      });
-      const data = await res.json();
-      document.getElementById("rideResult").textContent = JSON.stringify(data, null, 2);
-      if (data.ok && data.ride_id) {
-        lastRideId = data.ride_id;
-        document.getElementById("trackBox").style.display = "block";
-        startTrack();
-      }
-    }
-
-    async function startTrack(){
-      if (!lastRideId) return;
-      const el = document.getElementById("trackResult");
-      async function tick(){
-        const res = await fetch(`/api/rides/${lastRideId}/track`);
-        const data = await res.json();
-        el.textContent = JSON.stringify(data, null, 2);
-        if (data.status === "COMPLETED" || data.status === "CANCELED") return;
-        setTimeout(tick, 5000);
-      }
-      tick();
-    }
-
-    // -------- Driver --------
-    async function driverRegister(){
-      if (!me.id) { alert("Telegram ID tapılmadı. Telegram içində açın və ya yuxarıda ID daxil edin."); return; }
-      const payload = {
-        telegram_id: me.id,
-        username: me.username,
-        full_name: document.getElementById("d_fullname").value.trim(),
-        car_brand: document.getElementById("d_brand").value.trim(),
-        car_model: document.getElementById("d_model").value.trim(),
-        car_plate: document.getElementById("d_plate").value.trim(),
-        car_year: document.getElementById("d_year").value.trim(),
-        car_color: document.getElementById("d_color").value.trim(),
-      };
-      const res = await fetch("/api/driver/register", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
-      const data = await res.json();
-      document.getElementById("driverResult").textContent = JSON.stringify(data, null, 2);
-    }
-
-    async function uploadDoc(docType, fileInputId){
-      if (!me.id) { alert("Telegram ID yoxdur (Telegram içində açın və ya ID yazın)"); return; }
-      const inp = document.getElementById(fileInputId);
-      if (!inp.files || !inp.files[0]) { alert("Fayl seç"); return; }
-      const fd = new FormData();
-      fd.append("telegram_id", String(me.id));
-      fd.append("doc_type", docType);
-      fd.append("file", inp.files[0]);
-      const res = await fetch("/api/driver/upload", {method:"POST", body: fd});
-      const data = await res.json();
-      alert(JSON.stringify(data));
-    }
-
-    async function setOnline(val){
-      if (!me.id) return alert("Telegram ID yoxdur");
-      const res = await fetch("/api/driver/online", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, online: val})});
-      const data = await res.json();
-      document.getElementById("driverResult").textContent = JSON.stringify(data, null, 2);
-      if (data.ok && val) startLiveLocation();
-      if (data.ok && !val) stopLiveLocation();
-    }
-
-    function startLiveLocation(){
-      if (!navigator.geolocation) return;
-      if (watchId) return;
-      watchId = navigator.geolocation.watchPosition(async (pos) => {
-        const {latitude, longitude} = pos.coords;
-        await fetch("/api/driver/location", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, lat: latitude, lon: longitude})});
-      }, () => {}, {enableHighAccuracy:true, maximumAge:2000, timeout:10000});
-    }
-
-    function stopLiveLocation(){
-      if (watchId) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-    }
-
-    async function loadOffers(){
-      if (!me.id) return alert("Telegram ID yoxdur");
-      const res = await fetch("/api/driver/offers?telegram_id=" + encodeURIComponent(me.id));
-      const data = await res.json();
-      document.getElementById("driverResult").textContent = JSON.stringify({balance:data.balance,approved:data.approved,online:data.online}, null, 2);
-      const box = document.getElementById("offersBox");
-      box.innerHTML = "";
-      (data.offers||[]).forEach(o => {
-        const div = document.createElement("div");
-        div.className = "offer";
-        div.innerHTML = `
-          <div><b>Ride #${o.ride_id}</b> — ${o.price} AZN — ${o.distance_km} km</div>
-          <div class="muted">Pickup: ${o.pickup}</div>
-          <div class="muted">Dropoff: ${o.dropoff}</div>
-          <div style="margin-top:8px" class="grid3">
-            <button class="btn2" onclick="openWaze('${o.waze_pickup}')">Waze Pickup</button>
-            <button class="btn2" onclick="openWaze('${o.waze_dropoff}')">Waze Dropoff</button>
-            <button onclick="acceptOffer(${o.offer_id})">Accept</button>
-          </div>
-        `;
-        box.appendChild(div);
-      });
-    }
-
-    function openWaze(url){
-      if (!url || url==="null") return alert("Waze link hazır deyil");
-      window.open(url, "_blank");
-    }
-
-    async function acceptOffer(offerId){
-      const res = await fetch("/api/driver/accept", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, offer_id: offerId})});
-      const data = await res.json();
-      alert(JSON.stringify(data));
-      loadOffers();
-    }
-
-    async function topupRequest(){
-      if (!me.id) return alert("Telegram ID yoxdur");
-      const amount = document.getElementById("topup_amount").value.trim();
-      const method = document.getElementById("topup_method").value;
-      const res = await fetch("/api/driver/topup_request", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, amount, method})});
-      const data = await res.json();
-      alert(JSON.stringify(data));
-    }
-
-    window.addEventListener("DOMContentLoaded", () => {
-      initTG();
-      loadFallbackIdentity();
-      showIdentityBoxIfNeeded();
-      setMode();
-    });
-  </script>
 </head>
+
 <body>
   <div class="wrap">
-    <h2>PayTaksi <span class="pill" id="mode">passenger</span> <span class="pill">TG ID: <span id="tgid">-</span></span></h2>
+    <div class="top">
+      <h2 style="margin:0">PayTaksi</h2>
+      <span class="pill" id="fromPill">from: ?</span>
+      <span class="pill" id="idPill">TG ID: unknown</span>
+    </div>
 
-    <div id="tgWarn" class="card warn" style="display:none">
+    <div class="card" id="warnCard">
       <b>Diqqət:</b> Bu səhifə Telegram WebApp içində açılmasa Telegram user məlumatı gəlmir.
       <div class="muted" style="margin-top:8px">
         Normal istifadə: botdan “WebApp” düyməsi ilə aç.
-        Test üçün isə aşağıda Telegram ID-ni əl ilə daxil edə bilərsən.
       </div>
     </div>
 
-    <div id="identityBox" class="card" style="display:none">
-      <h3>Test üçün Telegram ID daxil et</h3>
-      <div class="muted">Telegram daxilində açanda buna ehtiyac yoxdur.</div>
+    <div class="card" id="testBlock">
+      <h3 style="margin:0 0 10px 0">Test üçün Telegram ID daxil et</h3>
+      <div class="muted" style="margin-bottom:10px">Telegram daxilində açanda buna ehtiyac yoxdur.</div>
       <div class="row">
         <div>
-          <label>Telegram ID</label>
-          <input id="manual_tid" placeholder="məs: 123456789" />
+          <div class="muted" style="margin-bottom:6px">Telegram ID</div>
+          <input id="manualId" placeholder="məs: 123456789" />
         </div>
         <div>
-          <label>Username (optional)</label>
-          <input id="manual_username" placeholder="məs: ratik1984" />
+          <div class="muted" style="margin-bottom:6px">Username (optional)</div>
+          <input id="manualUsername" placeholder="məs: ratik1984" />
         </div>
       </div>
-      <button onclick="saveIdentity()">Yadda saxla</button>
-      <div class="muted" style="margin-top:8px">
-        Alternativ: URL-ə belə əlavə edə bilərsən: <br>
-        <code>?from=driver&tid=123456789&username=ratik</code>
-      </div>
-    </div>
-
-    <!-- Passenger -->
-    <div id="passengerBox" class="card" style="display:none">
-      <div class="muted">Sərnişin: Yerini tap, ünvan yaz, OSRM ilə məsafə hesablanır, qiymət çıxır.</div>
-      <div class="row">
-        <div>
-          <label>Pick-up (Yer)</label>
-          <input id="pickup" placeholder="Məs: 40.4093,49.8671 və ya ünvan" />
-          <button onclick="detectLocationInto('pickup')">Yerimi tap</button>
-        </div>
-        <div>
-          <label>Drop-off (Gedəcəyin yer)</label>
-          <input id="dropoff" placeholder="Məs: Nizami küçəsi" oninput="autocomplete()" />
-          <div id="suggestions" style="margin-top:10px"></div>
-        </div>
-      </div>
-      <button onclick="createRide()">Sifariş et</button>
-      <pre id="rideResult" class="card" style="white-space:pre-wrap;margin-top:12px"></pre>
-
-      <div id="trackBox" class="card" style="display:none">
-        <div class="muted">Canlı izləmə (driver accept edəndən sonra driver location görünəcək):</div>
-        <pre id="trackResult" style="white-space:pre-wrap"></pre>
-      </div>
-    </div>
-
-    <!-- Driver -->
-    <div id="driverBox" class="card" style="display:none">
-      <div class="muted">Sürücü: Qeydiyyat (min 2010), sənədlər (ön/arxa), online ol, offer-ləri gör, accept et. Waze ilə naviqasiya.</div>
-
-      <div class="card">
-        <h3>Qeydiyyat</h3>
-        <div class="row">
-          <div>
-            <label>Ad Soyad</label>
-            <input id="d_fullname" placeholder="Ad Soyad" />
-          </div>
-          <div>
-            <label>Maşın ili (min 2010)</label>
-            <input id="d_year" placeholder="2010" />
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label>Rəng</label>
-            <select id="d_color">
-              <option value="ag">ağ</option>
-              <option value="qara">qara</option>
-              <option value="qirmizi">qırmızı</option>
-              <option value="boz">boz</option>
-              <option value="mavi">mavi</option>
-              <option value="sari">sarı</option>
-              <option value="yasil">yaşıl</option>
-            </select>
-          </div>
-          <div>
-            <label>Nömrə (optional)</label>
-            <input id="d_plate" placeholder="99-AB-123" />
-          </div>
-        </div>
-        <div class="row">
-          <div><label>Marka</label><input id="d_brand" placeholder="Toyota" /></div>
-          <div><label>Model</label><input id="d_model" placeholder="Prius" /></div>
-        </div>
-        <button onclick="driverRegister()">Qeydiyyatı yadda saxla</button>
-        <pre id="driverResult" class="card" style="white-space:pre-wrap;margin-top:12px"></pre>
-      </div>
-
-      <div class="card">
-        <h3>Sənədlər yüklə (ön/arxa)</h3>
-        <div class="row">
-          <div>
-            <div class="muted">Şəxsiyyət (ön)</div>
-            <input type="file" id="f_id_front" />
-            <button class="btn2" onclick="uploadDoc('id_front','f_id_front')">Yüklə</button>
-          </div>
-          <div>
-            <div class="muted">Şəxsiyyət (arxa)</div>
-            <input type="file" id="f_id_back" />
-            <button class="btn2" onclick="uploadDoc('id_back','f_id_back')">Yüklə</button>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <div class="muted">Sürücülük (ön)</div>
-            <input type="file" id="f_dl_front" />
-            <button class="btn2" onclick="uploadDoc('dl_front','f_dl_front')">Yüklə</button>
-          </div>
-          <div>
-            <div class="muted">Sürücülük (arxa)</div>
-            <input type="file" id="f_dl_back" />
-            <button class="btn2" onclick="uploadDoc('dl_back','f_dl_back')">Yüklə</button>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <div class="muted">Tex. Pasport (ön)</div>
-            <input type="file" id="f_reg_front" />
-            <button class="btn2" onclick="uploadDoc('reg_front','f_reg_front')">Yüklə</button>
-          </div>
-          <div>
-            <div class="muted">Tex. Pasport (arxa)</div>
-            <input type="file" id="f_reg_back" />
-            <button class="btn2" onclick="uploadDoc('reg_back','f_reg_back')">Yüklə</button>
-          </div>
-        </div>
-        <div class="muted">Sənədləri yüklədikdən sonra admin paneldən “Approve” edilməlidir.</div>
-      </div>
-
-      <div class="card">
-        <h3>Online / Offers</h3>
-        <div class="grid3">
-          <button onclick="setOnline(true)">Online</button>
-          <button class="btn2" onclick="setOnline(false)">Offline</button>
-          <button class="btn2" onclick="loadOffers()">Offer-lər</button>
-        </div>
-        <div id="offersBox"></div>
-      </div>
-
-      <div class="card">
-        <h3>Balans artırma (request)</h3>
-        <div class="row">
-          <div>
-            <label>Məbləğ (AZN)</label>
-            <input id="topup_amount" placeholder="10.00" />
-          </div>
-          <div>
-            <label>Metod</label>
-            <select id="topup_method">
-              <option value="card2card">kart→kart</option>
-              <option value="m10">m10</option>
-            </select>
-          </div>
-        </div>
-        <button onclick="topupRequest()">Topup Request göndər</button>
-        <div class="muted">Admin paneldə balans düzəlişi ilə təsdiqlənir.</div>
-      </div>
-
-      <div class="card">
-        <div class="muted">Waze: Offer-lərdə “Waze Pickup / Waze Dropoff” düymələri var. Telefonunda Waze varsa açılacaq.</div>
+      <div style="height:12px"></div>
+      <button id="saveBtn">Yadda saxla</button>
+      <div class="muted" style="margin-top:10px">
+        Alternativ: URL-a belə əlavə edə bilərsən: <code>?from=driver&id=123456789&username=ratik1984</code>
       </div>
     </div>
 
     <div class="card">
-      <div class="muted">
-        Qayda: Start 3.50 AZN, 3 km-dən sonra +0.40/km. Komissiya 10%.
+      <div class="muted">Sərnişin: Yerini tap, ünvan yaz, OSRM ilə məsafə hesablanır, qiymət çıxır.</div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <div><input placeholder="Pick-up (Yer)" /></div>
+        <div><input placeholder="Drop-off (Gedəcəyin yer)" /></div>
       </div>
     </div>
+
+    <div class="card">
+      <div class="muted">Debug</div>
+      <pre id="debug" style="white-space:pre-wrap;word-break:break-word;margin:8px 0 0 0"></pre>
+    </div>
   </div>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const from = params.get("from") || "unknown";
+  document.getElementById("fromPill").textContent = "from: " + from;
+
+  const debugEl = document.getElementById("debug");
+  const idPill = document.getElementById("idPill");
+  const warnCard = document.getElementById("warnCard");
+  const testBlock = document.getElementById("testBlock");
+
+  function setUser(id, username, source) {
+    if (!id) return;
+    idPill.textContent = "TG ID: " + id;
+    warnCard.style.display = "none";
+    testBlock.style.display = "none";
+    debugEl.textContent =
+      "SOURCE: " + source + "\n" +
+      "id: " + id + "\n" +
+      "username: " + (username || "-") + "\n" +
+      "from: " + from + "\n";
+  }
+
+  // 0) URL ilə test (developer)
+  const urlId = params.get("id");
+  if (urlId) {
+    setUser(urlId, params.get("username") || "", "URL query (test)");
+    return;
+  }
+
+  // 1) Telegram WebApp
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+
+      const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+      const initData = tg.initData || "";
+
+      debugEl.textContent =
+        "tg_present: yes\n" +
+        "initData_length: " + initData.length + "\n" +
+        "user: " + JSON.stringify(user) + "\n";
+
+      if (user && user.id) {
+        setUser(user.id, user.username, "Telegram initDataUnsafe");
+        return;
+      }
+    } catch (e) {
+      debugEl.textContent = "Telegram error: " + String(e);
+    }
+  } else {
+    debugEl.textContent = "tg_present: no\n";
+  }
+
+  // 2) Əgər Telegramdan gəlmirsə -> local test/manual
+  const savedId = localStorage.getItem("pt_tg_id");
+  const savedUsername = localStorage.getItem("pt_tg_username");
+  if (savedId) setUser(savedId, savedUsername, "localStorage");
+
+  document.getElementById("saveBtn").addEventListener("click", () => {
+    const id = (document.getElementById("manualId").value || "").trim();
+    const username = (document.getElementById("manualUsername").value || "").trim();
+    if (!id) return alert("Telegram ID daxil et");
+    localStorage.setItem("pt_tg_id", id);
+    localStorage.setItem("pt_tg_username", username);
+    setUser(id, username, "manual input");
+  });
+})();
+</script>
 </body>
 </html>
