@@ -18,6 +18,7 @@ from .db import Base, engine, get_db
 from .models import User, DriverProfile, DriverLocation, DriverDocument, Ride, TopUpRequest, Setting
 from .services import haversine_km, calc_fare
 from .telegram_utils import tg_send_message
+from .bot_runner import start_bots_if_enabled
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -41,6 +42,8 @@ def on_startup():
     # ensure dynamic settings exist
     with engine.begin() as conn:
         pass
+    # Render Free: run bots inside this web service
+    start_bots_if_enabled()
 
 
 def get_or_create_user(db: Session, tg_id: int, role: str, full_name: str | None = None):

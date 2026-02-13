@@ -109,7 +109,7 @@ def main():
     app.add_handler(CommandHandler("complete", complete_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
-    app.run_polling(close_loop=False)
+    app.run_polling(stop_signals=None, close_loop=False)
 
 
 if __name__ == "__main__":

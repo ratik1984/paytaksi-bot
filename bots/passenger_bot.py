@@ -20,7 +20,7 @@ def main():
         raise SystemExit("PASSENGER_BOT_TOKEN is not set")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.run_polling(close_loop=False)
+    app.run_polling(stop_signals=None, close_loop=False)
 
 
 if __name__ == "__main__":
