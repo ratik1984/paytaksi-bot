@@ -3,19 +3,37 @@ import asyncio
 import threading
 from typing import Optional, List
 
-from telegram import Update, WebAppInfo
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-def _make_start_handler(webapp_url: str, title: str):
+def _make_start_handler(webapp_url: str, title: str, button_text: str):
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message:
-            await update.message.reply_text(
-                f"{title} hazırdır. Aşağıdakı düymə ilə aç:\n{webapp_url}",
-                reply_markup={
-                    "keyboard": [[{"text": "Aç (WebApp)", "web_app": {"url": webapp_url}}]],
-                    "resize_keyboard": True
-                }
-            )
+        if not update.message:
+            return
+
+        # 1) Inline button (best UX: appears under the message)
+        inline = InlineKeyboardMarkup([
+            [InlineKeyboardButton(button_text, web_app={"url": webapp_url})]
+        ])
+
+        # 2) Also provide a reply keyboard WebApp button (works well on mobile)
+        reply_kb = {
+            "keyboard": [[{"text": button_text, "web_app": {"url": webapp_url}}]],
+            "resize_keyboard": True
+        }
+
+        # IMPORTANT: do NOT print the URL in the message, so users don't click a normal link.
+        await update.message.reply_text(
+            f"{title} hazırdır ✅\n\nAşağıdakı düyməyə bas və tətbiq açılacaq:",
+            reply_markup=inline
+        )
+
+        # Send reply keyboard too (separate message) so it stays visible.
+        await update.message.reply_text(
+            "Düymə aşağıda da görünür 👇",
+            reply_markup=reply_kb
+        )
     return start
 
 class BotGroup:
@@ -29,7 +47,6 @@ class BotGroup:
             await app.initialize()
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
-        # keep running
         while True:
             await asyncio.sleep(3600)
 
@@ -51,13 +68,13 @@ def build_bot_apps(base_url: str):
     if passenger:
         app = ApplicationBuilder().token(passenger).build()
         url = f"{base_url}/webapp/?from=passenger"
-        app.add_handler(CommandHandler("start", _make_start_handler(url, "PayTaksi Sərnişin")))
+        app.add_handler(CommandHandler("start", _make_start_handler(url, "PayTaksi Sərnişin", "🚕 Taksi sifariş ver")))
         apps.append(app)
 
     if driver:
         app = ApplicationBuilder().token(driver).build()
         url = f"{base_url}/webapp/?from=driver"
-        app.add_handler(CommandHandler("start", _make_start_handler(url, "PayTaksi Sürücü")))
+        app.add_handler(CommandHandler("start", _make_start_handler(url, "PayTaksi Sürücü", "🚗 Sürücü paneli")))
         apps.append(app)
 
     if admin:
@@ -65,7 +82,7 @@ def build_bot_apps(base_url: str):
         panel = f"{base_url}/admin"
         async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if update.message:
-                await update.message.reply_text(f"Admin panel: {panel}")
+                await update.message.reply_text(f"Admin panel linki:\n{panel}")
         app.add_handler(CommandHandler("start", start))
         apps.append(app)
 
