@@ -1,0 +1,71 @@
+services:
+  - type: web
+    name: paytaksi-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: PASSENGER_BOT_TOKEN
+        sync: false
+      - key: DRIVER_BOT_TOKEN
+        sync: false
+      - key: ADMIN_BOT_TOKEN
+        sync: false
+      - key: ADMIN_USERNAME
+        value: Ratik
+      - key: ADMIN_PASSWORD
+        value: "0123456789"
+
+  - type: worker
+    name: paytaksi-passenger-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bots/passenger_bot.py
+    envVars:
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: API_BASE
+        sync: false
+      - key: PASSENGER_BOT_TOKEN
+        sync: false
+
+  - type: worker
+    name: paytaksi-driver-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bots/driver_bot.py
+    envVars:
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: API_BASE
+        sync: false
+      - key: DRIVER_BOT_TOKEN
+        sync: false
+
+  - type: worker
+    name: paytaksi-admin-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bots/admin_bot.py
+    envVars:
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ADMIN_BOT_TOKEN
+        sync: false
+
+databases:
+  - name: paytaksi-postgres
+    plan: free
+    databaseName: paytaksi
+    user: paytaksi

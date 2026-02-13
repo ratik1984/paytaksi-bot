@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="mb-3">Sürücü: {{ u.full_name or '—' }} (#{{ u.id }})</h2>
+<div class="row g-3">
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div><b>Telegram ID:</b> {{ u.tg_id }}</div>
+        <div><b>Status:</b> {{ prof.status }}</div>
+        <div><b>Avto ili:</b> {{ prof.car_year }}</div>
+        <div><b>Rəng:</b> {{ prof.car_color }}</div>
+        <div><b>Balans:</b> {{ prof.balance }} AZN</div>
+        <div><b>Online:</b> {{ 'bəli' if prof.is_online else 'xeyr' }}</div>
+        <hr />
+        <form method="post" action="/admin/driver/{{ u.id }}/approve" class="d-inline">
+          <button class="btn btn-success">✅ Approve</button>
+        </form>
+        <form method="post" action="/admin/driver/{{ u.id }}/reject" class="d-inline">
+          <button class="btn btn-outline-danger">❌ Reject</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="mb-2">Sənədlər</h5>
+        {% if docs|length == 0 %}
+          <div class="text-muted">Sənəd yoxdur</div>
+        {% else %}
+          <ul class="list-group">
+            {% for d in docs %}
+              <li class="list-group-item d-flex justify-content-between align-items-center">
+                <span>{{ d.doc_type }} / {{ d.side }}</span>
+                <a class="btn btn-sm btn-primary" target="_blank" href="/admin/docfile/{{ d.id }}">Bax</a>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
