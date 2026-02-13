@@ -154,6 +154,42 @@ async function upsertUser(tgUser, role) {
 
 // ---- Places autocomplete (OpenStreetMap Nominatim)
 
+// Nominatim (OSM) sometimes returns HTML error pages (rate-limit, blocks, etc.).
+// If we call r.json() directly, it can crash the whole service. This helper prevents that.
+async function safeFetchJson(url, fetchOpts = {}) {
+  const r = await fetch(url, fetchOpts);
+  const ct = (r.headers.get('content-type') || '').toLowerCase();
+  const bodyText = await r.text();
+
+  // Upstream error
+  if (!r.ok) {
+    const err = new Error(`Upstream HTTP ${r.status}`);
+    err.status = r.status;
+    err.contentType = ct;
+    err.bodyPreview = bodyText.slice(0, 200);
+    throw err;
+  }
+
+  // Not JSON
+  if (!ct.includes('application/json') && !ct.includes('application/geo+json') && !ct.includes('text/json')) {
+    const err = new Error('Upstream did not return JSON');
+    err.status = r.status;
+    err.contentType = ct;
+    err.bodyPreview = bodyText.slice(0, 200);
+    throw err;
+  }
+
+  try {
+    return JSON.parse(bodyText);
+  } catch (e) {
+    const err = new Error('Invalid JSON from upstream');
+    err.status = r.status;
+    err.contentType = ct;
+    err.bodyPreview = bodyText.slice(0, 200);
+    throw err;
+  }
+}
+
 app.get('/api/reverse', async (req, res) => {
   try {
     const lat = Number(req.query.lat);
@@ -167,13 +203,12 @@ app.get('/api/reverse', async (req, res) => {
     url.searchParams.set('zoom', '18');
     url.searchParams.set('addressdetails', '1');
 
-    const r = await fetch(url.toString(), {
+    const j = await safeFetchJson(url.toString(), {
       headers: {
         'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)',
         'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
       }
     });
-    const j = await r.json();
     const name =
       (j && j.name) ||
       (j && j.address && (j.address.road || j.address.neighbourhood || j.address.suburb || j.address.city_district || j.address.city)) ||
@@ -181,36 +216,47 @@ app.get('/api/reverse', async (req, res) => {
       '';
     res.json({ ok: true, name, display_name: j.display_name || '' });
   } catch (e) {
-    res.status(500).json({ ok: false, error: 'reverse_failed' });
+    console.error('reverse geocode failed:', e.message, e.status || '', e.contentType || '', e.bodyPreview || '');
+    // Don't break the app if reverse fails.
+    res.json({ ok: true, name: '', display_name: '' });
   }
 });
 
 app.get('/api/places', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  const lat = Number(req.query.lat);
-  const lon = Number(req.query.lon);
-  if (!q || q.length < 3) return res.json({ ok: true, items: [] });
+  try {
+    const q = String(req.query.q || '').trim();
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    if (!q || q.length < 3) return res.json({ ok: true, items: [] });
 
-  const url = new URL('https://nominatim.openstreetmap.org/search');
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('q', q);
-  url.searchParams.set('limit', '6');
-  url.searchParams.set('addressdetails', '1');
-  if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-    url.searchParams.set('viewbox', `${lon-0.2},${lat+0.2},${lon+0.2},${lat-0.2}`);
-    url.searchParams.set('bounded', '1');
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('q', q);
+    url.searchParams.set('limit', '6');
+    url.searchParams.set('addressdetails', '1');
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+      url.searchParams.set('viewbox', `${lon - 0.2},${lat + 0.2},${lon + 0.2},${lat - 0.2}`);
+      url.searchParams.set('bounded', '1');
+    }
+
+    const data = await safeFetchJson(url.toString(), {
+      headers: {
+        'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)',
+        'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
+      }
+    });
+
+    const items = (data || []).map((x) => ({
+      title: x.display_name,
+      lat: Number(x.lat),
+      lon: Number(x.lon)
+    }));
+    res.json({ ok: true, items });
+  } catch (e) {
+    console.error('places search failed:', e.message, e.status || '', e.contentType || '', e.bodyPreview || '');
+    // Return empty suggestions instead of crashing the whole service.
+    res.json({ ok: true, items: [] });
   }
-
-  const r = await fetch(url.toString(), {
-    headers: { 'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)', 'Accept-Language': 'az,en;q=0.8,ru;q=0.7' }
-  });
-  const data = await r.json();
-  const items = (data || []).map((x) => ({
-    title: x.display_name,
-    lat: Number(x.lat),
-    lon: Number(x.lon)
-  }));
-  res.json({ ok: true, items });
 });
 
 // ---- Passenger: create ride
