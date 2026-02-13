@@ -120,9 +120,9 @@ if (adminBot) {
 }
 
 // Webhook endpoints (secret path)
-app.use(`/webhook/${WEBHOOK_SECRET}/passenger`, passengerBot ? passengerBot.webhookCallback('/webhook') : ((req,res)=>res.status(503).send('passenger bot disabled')));
-app.use(`/webhook/${WEBHOOK_SECRET}/driver`, driverBot ? driverBot.webhookCallback('/webhook') : ((req,res)=>res.status(503).send('driver bot disabled')));
-app.use(`/webhook/${WEBHOOK_SECRET}/admin`, adminBot ? adminBot.webhookCallback('/webhook') : ((req,res)=>res.status(503).send('admin bot disabled')));
+if (passengerBot) app.use(passengerBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/passenger`));
+if (driverBot) app.use(driverBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/driver`));
+if (adminBot) app.use(adminBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/admin`));
 
 // ---- Telegram WebApp auth middleware
 function requireTelegram(role) {
