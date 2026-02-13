@@ -211,31 +211,132 @@ function cacheSet(key, data, ttlMs = 60_000) {
   _geoCache.set(key, { exp: Date.now() + ttlMs, data });
 }
 
-app.get('/api/reverse', async (req, res) => {
+// ---- Geocoding helpers (Nominatim primary, Photon fallback)
+async function reverseGeocode(lat, lon) {
+  // 1) Nominatim
   try {
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
-    if (Number.isNaN(lat) || Number.isNaN(lon)) return res.status(400).json({ ok: false, error: 'lat/lon required' });
-
     const url = new URL('https://nominatim.openstreetmap.org/reverse');
     url.searchParams.set('format', 'jsonv2');
     url.searchParams.set('lat', String(lat));
     url.searchParams.set('lon', String(lon));
     url.searchParams.set('zoom', '18');
     url.searchParams.set('addressdetails', '1');
-
     const j = await safeFetchJson(url.toString(), {
       headers: {
-        'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)',
+        'User-Agent': 'PayTaksi-MVP/1.0',
         'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
       }
     });
-    const name =
-      (j && j.name) ||
-      (j && j.address && (j.address.road || j.address.neighbourhood || j.address.suburb || j.address.city_district || j.address.city)) ||
-      (j && j.display_name) ||
-      '';
-    res.json({ ok: true, name, display_name: j.display_name || '' });
+    return j;
+  } catch (e) {
+    // fall through
+  }
+
+  // 2) Photon reverse
+  try {
+    const url = new URL('https://photon.komoot.io/reverse');
+    url.searchParams.set('lat', String(lat));
+    url.searchParams.set('lon', String(lon));
+    const j = await safeFetchJson(url.toString(), {
+      headers: {
+        'User-Agent': 'PayTaksi-MVP/1.0'
+      }
+    });
+    return j;
+  } catch (e) {
+    return null;
+  }
+}
+
+function photonFeatureToItem(f) {
+  const p = (f && f.properties) || {};
+  const c = (f && f.geometry && f.geometry.coordinates) || [];
+  const titleParts = [p.name, p.street, p.housenumber, p.district, p.city, p.state, p.country].filter(Boolean);
+  return {
+    title: titleParts.join(' ').trim() || p.name || 'Yer',
+    lat: Number(c[1]),
+    lon: Number(c[0])
+  };
+}
+
+async function searchPlaces(q, lat, lon) {
+  // 1) Nominatim
+  try {
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('q', q);
+    url.searchParams.set('limit', '10');
+    url.searchParams.set('addressdetails', '1');
+    url.searchParams.set('countrycodes', 'az');
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+      url.searchParams.set('viewbox', `${lon - 0.2},${lat + 0.2},${lon + 0.2},${lat - 0.2}`);
+      url.searchParams.set('bounded', '0');
+    }
+    const data = await safeFetchJson(url.toString(), {
+      headers: {
+        'User-Agent': 'PayTaksi-MVP/1.0',
+        'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
+      }
+    });
+    const items = (data || []).map((x) => ({
+      title: x.display_name,
+      lat: Number(x.lat),
+      lon: Number(x.lon)
+    }));
+    if (items && items.length) return items;
+  } catch (e) {
+    // fall through
+  }
+
+  // 2) Photon search
+  try {
+    const url = new URL('https://photon.komoot.io/api/');
+    url.searchParams.set('q', q);
+    url.searchParams.set('limit', '10');
+    // Photon doesn't have strict countrycodes, but we can bias to Baku area with lat/lon
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+      url.searchParams.set('lat', String(lat));
+      url.searchParams.set('lon', String(lon));
+    }
+    const j = await safeFetchJson(url.toString(), {
+      headers: {
+        'User-Agent': 'PayTaksi-MVP/1.0'
+      }
+    });
+    const feats = (j && j.features) || [];
+    const items = feats.map(photonFeatureToItem).filter((it) => Number.isFinite(it.lat) && Number.isFinite(it.lon));
+    return items;
+  } catch (e) {
+    return [];
+  }
+}
+
+app.get('/api/reverse', async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return res.status(400).json({ ok: false, error: 'lat/lon required' });
+
+    const j = await reverseGeocode(lat, lon);
+    if (!j) return res.json({ ok: true, name: '', display_name: '' });
+
+    // Nominatim style
+    if (j && (j.display_name || j.name || j.address)) {
+      const name =
+        (j && j.name) ||
+        (j && j.address && (j.address.road || j.address.neighbourhood || j.address.suburb || j.address.city_district || j.address.city)) ||
+        (j && j.display_name) ||
+        '';
+      return res.json({ ok: true, name, display_name: j.display_name || '' });
+    }
+
+    // Photon style
+    if (j && j.features && j.features[0]) {
+      const it = photonFeatureToItem(j.features[0]);
+      return res.json({ ok: true, name: it.title || '', display_name: it.title || '' });
+    }
+
+    res.json({ ok: true, name: '', display_name: '' });
   } catch (e) {
     console.error('reverse geocode failed:', e.message, e.status || '', e.contentType || '', e.bodyPreview || '');
     // Don't break the app if reverse fails.
@@ -260,30 +361,7 @@ app.get('/api/places', async (req, res) => {
     const cached = cacheGet(cacheKey);
     if (cached) return res.json({ ok: true, items: cached });
 
-    const url = new URL('https://nominatim.openstreetmap.org/search');
-    url.searchParams.set('format', 'jsonv2');
-    url.searchParams.set('q', q2);
-    url.searchParams.set('limit', '10');
-    url.searchParams.set('addressdetails', '1');
-    url.searchParams.set('countrycodes', 'az');
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-      url.searchParams.set('viewbox', `${lon - 0.2},${lat + 0.2},${lon + 0.2},${lat - 0.2}`);
-      // NOTE: don't hard-bound results; just bias to nearby area
-      url.searchParams.set('bounded', '0');
-    }
-
-    const data = await safeFetchJson(url.toString(), {
-      headers: {
-        'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)',
-        'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
-      }
-    });
-
-    const items = (data || []).map((x) => ({
-      title: x.display_name,
-      lat: Number(x.lat),
-      lon: Number(x.lon)
-    }));
+    const items = await searchPlaces(q2, lat, lon);
     cacheSet(cacheKey, items, 60_000);
     res.json({ ok: true, items });
   } catch (e) {
