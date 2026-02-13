@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: paytaksi-api
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: RUN_BOTS_IN_WEB
+        value: "1"
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: API_BASE
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: "Ratik"
+      - key: ADMIN_PASSWORD
+        value: "0123456789"
+      - key: PASSENGER_BOT_TOKEN
+        sync: false
+      - key: DRIVER_BOT_TOKEN
+        sync: false
+      - key: ADMIN_BOT_TOKEN
+        sync: false
+
+databases:
+  - name: paytaksi-postgres
+    plan: free

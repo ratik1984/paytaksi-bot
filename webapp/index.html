@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:0; background:#0b0f19; color:#fff}
+    .wrap{max-width:820px;margin:0 auto;padding:20px}
+    .card{background:#121a2a;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin:12px 0}
+    input,select,button{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0b1222;color:#fff;margin-top:8px}
+    button{background:#2b6cff;border:none;font-weight:700;cursor:pointer}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .muted{color:rgba(255,255,255,.7);font-size:14px}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:12px}
+  </style>
+  <script>
+    // Telegram WebApp safe init
+    window.addEventListener("DOMContentLoaded", () => {
+      const tg = window.Telegram && window.Telegram.WebApp;
+      if (tg) { tg.ready(); tg.expand(); }
+      const params = new URLSearchParams(location.search);
+      document.getElementById("mode").textContent = params.get("from") || "passenger";
+    });
+
+    async function detectLocation() {
+      const out = document.getElementById("pickup");
+      out.value = "Yer müəyyən edilir...";
+      if (!navigator.geolocation) { out.value = ""; alert("Geolocation dəstəklənmir"); return; }
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        const {latitude, longitude} = pos.coords;
+        out.value = latitude.toFixed(6) + "," + longitude.toFixed(6);
+      }, () => { out.value=""; alert("Location icazəsi verilmədi"); }, {enableHighAccuracy:true, timeout:10000});
+    }
+
+    async function autocomplete() {
+      const q = document.getElementById("dropoff").value.trim();
+      if (q.length < 3) return;
+      const res = await fetch("/api/places?q=" + encodeURIComponent(q));
+      const data = await res.json();
+      const list = document.getElementById("suggestions");
+      list.innerHTML = "";
+      (data.results || []).slice(0,6).forEach(p => {
+        const opt = document.createElement("div");
+        opt.className = "pill";
+        opt.style.marginRight = "8px";
+        opt.style.marginBottom = "8px";
+        opt.style.cursor = "pointer";
+        opt.textContent = p.display_name;
+        opt.onclick = () => { document.getElementById("dropoff").value = p.display_name; };
+        list.appendChild(opt);
+      });
+    }
+
+    async function createRide() {
+      const pickup = document.getElementById("pickup").value.trim();
+      const dropoff = document.getElementById("dropoff").value.trim();
+      if (!pickup || !dropoff) { alert("Pick-up və drop-off doldurun"); return; }
+      const res = await fetch("/api/rides", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({pickup, dropoff})
+      });
+      const data = await res.json();
+      document.getElementById("rideResult").textContent = JSON.stringify(data, null, 2);
+    }
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <h2>PayTaksi <span class="pill" id="mode">passenger</span></h2>
+    <div class="card">
+      <div class="muted">Sərnişin üçün test mini-app. Yerini avtomatik təyin et, gedəcəyin ünvanı yaz, alternativlər gör.</div>
+      <div class="row">
+        <div>
+          <label>Pick-up (Yer)</label>
+          <input id="pickup" placeholder="Məs: 40.4093,49.8671" />
+          <button onclick="detectLocation()">Yerimi tap</button>
+        </div>
+        <div>
+          <label>Drop-off (Gedəcəyin yer)</label>
+          <input id="dropoff" placeholder="Məs: Nizami küçəsi" oninput="autocomplete()" />
+          <div id="suggestions" style="margin-top:10px"></div>
+        </div>
+      </div>
+      <button onclick="createRide()">Sifariş et (test)</button>
+      <pre id="rideResult" class="card" style="white-space:pre-wrap;margin-top:12px"></pre>
+    </div>
+
+    <div class="card">
+      <div class="muted">
+        Qiymət qaydası: 3.50 AZN başlanğıc, 3 km-dən sonra hər 1 km = 0.40 AZN. Komissiya 10%.
+        (Bu prototipdə distance test məqsədlidir.)
+      </div>
+    </div>
+  </div>
+</body>
+</html>
