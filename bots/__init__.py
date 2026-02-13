@@ -1,1 +1,0 @@
-# PayTaksi bots package
