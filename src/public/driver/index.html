@@ -1,0 +1,172 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi - Sürücü</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="../assets/common.js"></script>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:14px}
+    .card{border:1px solid #e6e6e6;border-radius:14px;padding:12px;margin:10px 0}
+    input,button,select{width:100%;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:16px}
+    button{border:none;background:#111;color:#fff}
+    .row{display:grid;grid-template-columns:1fr;gap:8px}
+    .muted{color:#666;font-size:13px}
+    .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  </style>
+</head>
+<body>
+  <h2>PayTaksi 🚖</h2>
+  <div class="muted" id="who"></div>
+
+  <div class="card">
+    <b>Hesab</b>
+    <div class="muted" id="acc">—</div>
+  </div>
+
+  <div class="card">
+    <b>Qeydiyyat (min 2010)</b>
+    <div class="row">
+      <input id="phone" placeholder="Telefon" />
+      <div class="two">
+        <input id="make" placeholder="Avto marka" />
+        <input id="model" placeholder="Model" />
+      </div>
+      <div class="two">
+        <input id="year" type="number" placeholder="Buraxılış ili (>=2010)" />
+        <select id="color">
+          <option value="">Rəng seçin</option>
+          <option>ağ</option><option>qara</option><option>qırmızı</option><option>boz</option><option>mavi</option><option>sarı</option><option>yaşıl</option>
+        </select>
+      </div>
+      <input id="plate" placeholder="Nömrə nişanı" />
+
+      <div class="muted">Şəxsiyyət vəsiqəsi (ön/arxa)</div>
+      <div class="two"><input type="file" id="id_front" accept="image/*" /><input type="file" id="id_back" accept="image/*" /></div>
+      <div class="muted">Sürücülük vəsiqəsi (ön/arxa)</div>
+      <div class="two"><input type="file" id="dl_front" accept="image/*" /><input type="file" id="dl_back" accept="image/*" /></div>
+      <div class="muted">Texniki pasport (ön/arxa)</div>
+      <div class="two"><input type="file" id="tp_front" accept="image/*" /><input type="file" id="tp_back" accept="image/*" /></div>
+
+      <button id="btnReg">✅ Qeydiyyatı göndər</button>
+      <div class="muted" id="regStatus">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>Balans artır (manual)</b>
+    <div class="row">
+      <input id="top_amount" type="number" step="0.01" placeholder="Məbləğ (AZN)" />
+      <select id="top_method"><option value="kart-to-kart">kart-to-kart</option><option value="m10">m10</option></select>
+      <input id="top_ref" placeholder="Tranzaksiya ID / qeyd" />
+      <button id="btnTop">💳 Sorğu göndər</button>
+      <div class="muted" id="topStatus">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>Açıq sifarişlər</b>
+    <div class="muted">Balans -10 və ya aşağı olanda sifariş ala bilmirsiniz. Komissiya: 10%.</div>
+    <div id="rides"></div>
+  </div>
+
+<script>
+Telegram.WebApp.ready();
+Telegram.WebApp.expand();
+
+const who = document.getElementById('who');
+const accEl = document.getElementById('acc');
+const regStatus = document.getElementById('regStatus');
+const ridesEl = document.getElementById('rides');
+const topStatus = document.getElementById('topStatus');
+
+const u = tgUser();
+who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
+
+async function loadMe(){
+  try{
+    const data = await api('/api/driver/me');
+    if (!data.driver){
+      accEl.textContent = 'Qeydiyyat yoxdur. Aşağıdakı formu doldurun.';
+      return;
+    }
+    accEl.innerHTML = `Status: <b>${data.driver.status}</b><br>Balans: <b>${data.driver.balance} AZN</b> (blok həddi: ${data.blockAt})`;
+  }catch(e){
+    accEl.textContent = 'Xəta: '+(e.data?.reason||e.message);
+  }
+}
+
+document.getElementById('btnReg').onclick = async ()=>{
+  try{
+    setStatus(regStatus,'Yüklənir…');
+    const fd = new FormData();
+    fd.append('phone', document.getElementById('phone').value.trim());
+    fd.append('car_make', document.getElementById('make').value.trim());
+    fd.append('car_model', document.getElementById('model').value.trim());
+    fd.append('car_year', document.getElementById('year').value.trim());
+    fd.append('car_color', document.getElementById('color').value);
+    fd.append('plate', document.getElementById('plate').value.trim());
+    ['id_front','id_back','dl_front','dl_back','tp_front','tp_back'].forEach((k)=>{
+      const f = document.getElementById(k).files[0];
+      if (f) fd.append(k, f);
+    });
+
+    const headers = {};
+    if (tgInitData()) headers['X-Tg-InitData'] = tgInitData();
+
+    const res = await fetch('/api/driver/register', { method:'POST', headers, body: fd });
+    const data = await res.json();
+    if (!res.ok) throw { data };
+    setStatus(regStatus,'Göndərildi ✅. Admin təsdiqi gözlənilir.');
+    await loadMe();
+  }catch(e){
+    setStatus(regStatus,'Xəta: '+(e.data?.error||e.data?.reason||'http'), false);
+  }
+};
+
+document.getElementById('btnTop').onclick = async ()=>{
+  try{
+    setStatus(topStatus,'Göndərilir…');
+    const amount = Number(document.getElementById('top_amount').value);
+    const method = document.getElementById('top_method').value;
+    const reference = document.getElementById('top_ref').value.trim();
+    await api('/api/driver/topup_request', { method:'POST', body:{ amount, method, reference }});
+    setStatus(topStatus,'Sorğu göndərildi ✅ (admin təsdiqi gözlənilir).');
+  }catch(e){
+    setStatus(topStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+  }
+};
+
+async function loadOpenRides(){
+  try{
+    const data = await api('/api/driver/open_rides');
+    ridesEl.innerHTML='';
+    if (data.note) ridesEl.innerHTML = `<div class="muted">Qeyd: ${data.note}</div>`;
+    (data.rides||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
+      ${r.pickup_text||''} → ${r.drop_text||''}<br>
+      Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+      <button data-id="${r.id}">✅ Qəbul et</button>`;
+      div.querySelector('button').onclick = async ()=>{
+        try{
+          const rr = await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
+          alert('Qəbul edildi. İndi Start/Complete üçün Admin paneldən və ya gələcək versiyada burdan idarə olunacaq.');
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      ridesEl.appendChild(div);
+    });
+    if (!(data.rides||[]).length) ridesEl.innerHTML += '<div class="muted">Açıq sifariş yoxdur.</div>';
+  }catch(e){}
+}
+
+loadMe();
+loadOpenRides();
+setInterval(()=>{loadMe();loadOpenRides();}, 5000);
+</script>
+</body>
+</html>
