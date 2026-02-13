@@ -57,14 +57,33 @@ let drop = null;
 
 document.getElementById('btnLoc').onclick = () => {
   setStatus(statusEl,'GPS sorğusu…');
-  navigator.geolocation.getCurrentPosition((pos)=>{
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
     pickup = { lat: pos.coords.latitude, lon: pos.coords.longitude, text: 'Mənim yerim' };
-    locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+    locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)} (tapılır…)`;
+
+    // Mövcud yerin adını tap (reverse geocode)
+    try{
+      const url = new URL('/api/reverse', location.origin);
+      url.searchParams.set('lat', pickup.lat);
+      url.searchParams.set('lon', pickup.lon);
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.ok && (j.name || j.display_name)){
+        pickup.text = j.name || j.display_name;
+        locTxt.textContent = `Yer: ${pickup.text}`;
+      } else {
+        locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+      }
+    }catch(e){
+      locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+    }
+
     setStatus(statusEl,'Yer tapıldı ✅');
   }, (err)=>{
     setStatus(statusEl,'GPS icazəsi verilmədi ❌', false);
   }, { enableHighAccuracy:true, timeout:10000 });
 };
+
 
 let tmr = null;
 document.getElementById('dest').addEventListener('input', (e)=>{

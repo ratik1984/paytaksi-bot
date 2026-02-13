@@ -153,6 +153,38 @@ async function upsertUser(tgUser, role) {
 }
 
 // ---- Places autocomplete (OpenStreetMap Nominatim)
+
+app.get('/api/reverse', async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return res.status(400).json({ ok: false, error: 'lat/lon required' });
+
+    const url = new URL('https://nominatim.openstreetmap.org/reverse');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('lat', String(lat));
+    url.searchParams.set('lon', String(lon));
+    url.searchParams.set('zoom', '18');
+    url.searchParams.set('addressdetails', '1');
+
+    const r = await fetch(url.toString(), {
+      headers: {
+        'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)',
+        'Accept-Language': 'az,en;q=0.8,ru;q=0.7'
+      }
+    });
+    const j = await r.json();
+    const name =
+      (j && j.name) ||
+      (j && j.address && (j.address.road || j.address.neighbourhood || j.address.suburb || j.address.city_district || j.address.city)) ||
+      (j && j.display_name) ||
+      '';
+    res.json({ ok: true, name, display_name: j.display_name || '' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'reverse_failed' });
+  }
+});
+
 app.get('/api/places', async (req, res) => {
   const q = String(req.query.q || '').trim();
   const lat = Number(req.query.lat);
@@ -170,7 +202,7 @@ app.get('/api/places', async (req, res) => {
   }
 
   const r = await fetch(url.toString(), {
-    headers: { 'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)' }
+    headers: { 'User-Agent': 'PayTaksi-MVP/1.0 (contact: admin@example.com)', 'Accept-Language': 'az,en;q=0.8,ru;q=0.7' }
   });
   const data = await r.json();
   const items = (data || []).map((x) => ({
