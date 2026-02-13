@@ -57,6 +57,33 @@ const pickupSuggEl = document.getElementById('pickupSuggestions');
 const u = tgUser();
 who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
 
+let lastDistanceKm = 0;
+
+function haversineKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const lat1 = a.lat * Math.PI / 180;
+  const lat2 = b.lat * Math.PI / 180;
+  const x = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function calcFare(distanceKm) {
+  const base = 3.50;
+  if (!distanceKm || distanceKm <= 0) return base;
+  if (distanceKm <= 3) return base;
+  return base + (distanceKm - 3) * 0.40;
+}
+function updateFareUI() {
+  const el = document.getElementById('fareInfo');
+  if (!el) return;
+  if (!pickup || !drop) { el.textContent = ''; lastDistanceKm = 0; return; }
+  const km = haversineKm({lat:pickup.lat, lon:pickup.lon}, {lat:drop.lat, lon:drop.lon});
+  lastDistanceKm = km;
+  const fare = calcFare(km);
+  el.textContent = `Məsafə: ${km.toFixed(2)} km • Təxmini məbləğ: ${fare.toFixed(2)} AZN`;
+}
+
 let pickup = null;
 let drop = null;
 
@@ -149,7 +176,8 @@ document.getElementById('btnCreate').onclick = async ()=>{
     setStatus(statusEl,'Sifariş yaradılır…');
     const data = await api('/api/passenger/create_ride',{method:'POST',body:{
       pickup_lat: pickup.lat, pickup_lon: pickup.lon, pickup_text: pickup.text,
-      drop_lat: drop.lat, drop_lon: drop.lon, drop_text: drop.text
+      drop_lat: drop.lat, drop_lon: drop.lon, drop_text: drop.text,
+      distance_km: lastDistanceKm
     }});
     setStatus(statusEl,`Sifariş #${data.ride.id} yaradıldı. Təxmini qiymət: ${data.ride.fare} AZN (komissiya: ${data.ride.commission} AZN)`);
     await loadRides();

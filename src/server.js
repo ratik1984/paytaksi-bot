@@ -128,6 +128,25 @@ if (adminBot) app.use(adminBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/admin
 function requireTelegram(role) {
   return (req, res, next) => {
     const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
+
+    // Fallback: allow "unsafe" mode when initData is not present (no hash verification).
+    if (!initData) {
+      const unsafe = req.headers['x-tg-unsafe'] || req.body?.unsafe;
+      if (unsafe) {
+        try {
+          const parsed = typeof unsafe === 'string' ? JSON.parse(unsafe) : unsafe;
+          const user = parsed?.user;
+          if (user?.id) {
+            req.tgInitData = '';
+            req.tgUser = user;
+            req.tgUnsafe = true;
+            return next();
+          }
+        } catch (e) {}
+      }
+      return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
+    }
+
     const botToken = TOKENS[role];
     const check = validateTelegramWebAppData(initData, botToken);
     if (!check.ok) return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: check.reason });
@@ -135,7 +154,7 @@ function requireTelegram(role) {
     const params = new URLSearchParams(initData);
     const userJson = params.get('user');
     req.tgUser = userJson ? JSON.parse(userJson) : null;
-    if (!req.tgUser?.id) return res.status(401).json({ ok: false, error: 'no_user' });
+    if (!req.tgUser?.id) return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_user' });
     next();
   };
 }
@@ -395,6 +414,32 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 });
 
 // passenger: check ride status
+app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
+  try {
+    const passenger_tg_id = String(req.tgUser.id);
+    const ride_id = Number(req.body.ride_id);
+    if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
+
+    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
+    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+
+    if (!['searching','assigned'].includes(ride.status)) {
+      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+    }
+
+    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+
+    if (ride.driver_tg_id) {
+      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
