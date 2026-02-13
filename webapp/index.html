@@ -17,6 +17,7 @@
     .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
     a{color:#8ab4ff}
     .offer{border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:12px; margin:10px 0}
+    .warn{background:rgba(255,107,107,.12);border:1px solid rgba(255,107,107,.35)}
   </style>
   <script>
     let tg = null;
@@ -24,6 +25,10 @@
     let me = {id:null, username:null};
     let watchId = null;
     let lastRideId = null;
+
+    function qs(){
+      return new URLSearchParams(location.search);
+    }
 
     function initTG(){
       tg = window.Telegram && window.Telegram.WebApp;
@@ -34,13 +39,46 @@
       }
     }
 
+    function loadFallbackIdentity(){
+      const p = qs();
+      const tid = p.get("tid") || localStorage.getItem("paytaksi_tid");
+      const uname = p.get("username") || localStorage.getItem("paytaksi_username");
+      if (tid) me.id = Number(tid);
+      if (uname) me.username = uname;
+    }
+
+    function showIdentityBoxIfNeeded(){
+      const box = document.getElementById("identityBox");
+      if (!me.id){
+        box.style.display = "block";
+      } else {
+        box.style.display = "none";
+      }
+      document.getElementById("tgid").textContent = me.id ? String(me.id) : "unknown";
+    }
+
+    function saveIdentity(){
+      const tid = document.getElementById("manual_tid").value.trim();
+      const uname = document.getElementById("manual_username").value.trim();
+      if (!tid) return alert("Telegram ID yaz");
+      localStorage.setItem("paytaksi_tid", tid);
+      localStorage.setItem("paytaksi_username", uname);
+      me.id = Number(tid);
+      me.username = uname;
+      showIdentityBoxIfNeeded();
+      setMode();
+      alert("OK. İndi davam et.");
+    }
+
     function setMode(){
-      const params = new URLSearchParams(location.search);
+      const params = qs();
       mode = params.get("from") || "passenger";
       document.getElementById("mode").textContent = mode;
       document.getElementById("tgid").textContent = me.id ? String(me.id) : "unknown";
       document.getElementById("passengerBox").style.display = mode==="passenger" ? "block":"none";
       document.getElementById("driverBox").style.display = mode==="driver" ? "block":"none";
+      // Warning if not in Telegram
+      document.getElementById("tgWarn").style.display = (window.Telegram && window.Telegram.WebApp && me.id) ? "none" : "block";
     }
 
     async function detectLocationInto(inputId) {
@@ -105,7 +143,7 @@
 
     // -------- Driver --------
     async function driverRegister(){
-      if (!me.id) { alert("Telegram user tapılmadı. WebApp Telegram içində açılmalıdır."); return; }
+      if (!me.id) { alert("Telegram ID tapılmadı. Telegram içində açın və ya yuxarıda ID daxil edin."); return; }
       const payload = {
         telegram_id: me.id,
         username: me.username,
@@ -122,7 +160,7 @@
     }
 
     async function uploadDoc(docType, fileInputId){
-      if (!me.id) { alert("Telegram user yoxdur"); return; }
+      if (!me.id) { alert("Telegram ID yoxdur (Telegram içində açın və ya ID yazın)"); return; }
       const inp = document.getElementById(fileInputId);
       if (!inp.files || !inp.files[0]) { alert("Fayl seç"); return; }
       const fd = new FormData();
@@ -135,7 +173,7 @@
     }
 
     async function setOnline(val){
-      if (!me.id) return alert("Telegram user yoxdur");
+      if (!me.id) return alert("Telegram ID yoxdur");
       const res = await fetch("/api/driver/online", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, online: val})});
       const data = await res.json();
       document.getElementById("driverResult").textContent = JSON.stringify(data, null, 2);
@@ -157,7 +195,7 @@
     }
 
     async function loadOffers(){
-      if (!me.id) return alert("Telegram user yoxdur");
+      if (!me.id) return alert("Telegram ID yoxdur");
       const res = await fetch("/api/driver/offers?telegram_id=" + encodeURIComponent(me.id));
       const data = await res.json();
       document.getElementById("driverResult").textContent = JSON.stringify({balance:data.balance,approved:data.approved,online:data.online}, null, 2);
@@ -193,6 +231,7 @@
     }
 
     async function topupRequest(){
+      if (!me.id) return alert("Telegram ID yoxdur");
       const amount = document.getElementById("topup_amount").value.trim();
       const method = document.getElementById("topup_method").value;
       const res = await fetch("/api/driver/topup_request", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({telegram_id: me.id, amount, method})});
@@ -202,6 +241,8 @@
 
     window.addEventListener("DOMContentLoaded", () => {
       initTG();
+      loadFallbackIdentity();
+      showIdentityBoxIfNeeded();
       setMode();
     });
   </script>
@@ -210,9 +251,37 @@
   <div class="wrap">
     <h2>PayTaksi <span class="pill" id="mode">passenger</span> <span class="pill">TG ID: <span id="tgid">-</span></span></h2>
 
+    <div id="tgWarn" class="card warn" style="display:none">
+      <b>Diqqət:</b> Bu səhifə Telegram WebApp içində açılmasa Telegram user məlumatı gəlmir.
+      <div class="muted" style="margin-top:8px">
+        Normal istifadə: botdan “WebApp” düyməsi ilə aç.
+        Test üçün isə aşağıda Telegram ID-ni əl ilə daxil edə bilərsən.
+      </div>
+    </div>
+
+    <div id="identityBox" class="card" style="display:none">
+      <h3>Test üçün Telegram ID daxil et</h3>
+      <div class="muted">Telegram daxilində açanda buna ehtiyac yoxdur.</div>
+      <div class="row">
+        <div>
+          <label>Telegram ID</label>
+          <input id="manual_tid" placeholder="məs: 123456789" />
+        </div>
+        <div>
+          <label>Username (optional)</label>
+          <input id="manual_username" placeholder="məs: ratik1984" />
+        </div>
+      </div>
+      <button onclick="saveIdentity()">Yadda saxla</button>
+      <div class="muted" style="margin-top:8px">
+        Alternativ: URL-ə belə əlavə edə bilərsən: <br>
+        <code>?from=driver&tid=123456789&username=ratik</code>
+      </div>
+    </div>
+
     <!-- Passenger -->
     <div id="passengerBox" class="card" style="display:none">
-      <div class="muted">Sərnişin: Yerini tap, ünvan yaz, OSRM ilə məsafə hesablanır, qiymət çıxır. Sürücülərə offer gedir (online + yaxın).</div>
+      <div class="muted">Sərnişin: Yerini tap, ünvan yaz, OSRM ilə məsafə hesablanır, qiymət çıxır.</div>
       <div class="row">
         <div>
           <label>Pick-up (Yer)</label>
@@ -353,7 +422,7 @@
 
     <div class="card">
       <div class="muted">
-        Qayda: Start 3.50 AZN, 3 km-dən sonra +0.40/km. Komissiya 10% (MVP-də commission hesablanması növbəti patch-də ride complete zamanı tətbiq ediləcək).
+        Qayda: Start 3.50 AZN, 3 km-dən sonra +0.40/km. Komissiya 10%.
       </div>
     </div>
   </div>
