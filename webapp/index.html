@@ -4,10 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PayTaksi WebApp</title>
-
-  <!-- Telegram WebApp SDK (mütləq) -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-
   <style>
     body{font-family:system-ui,Arial;margin:0;background:#0b1220;color:#fff}
     .wrap{max-width:720px;margin:0 auto;padding:16px}
@@ -18,51 +15,46 @@
     .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#1c2942;border:1px solid #2c3a58}
     .top{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .danger{border-color:#7a2b2b;background:#1d0f12}
   </style>
 </head>
-
 <body>
   <div class="wrap">
     <div class="top">
       <h2 style="margin:0">PayTaksi</h2>
       <span class="pill" id="fromPill">from: ?</span>
-      <span class="pill" id="idPill">TG ID: unknown</span>
+      <span class="pill" id="idPill">TG ID: checking…</span>
     </div>
 
-    <div class="card" id="warnCard">
-      <b>Diqqət:</b> Bu səhifə Telegram WebApp içində açılmasa Telegram user məlumatı gəlmir.
-      <div class="muted" style="margin-top:8px">
-        Normal istifadə: botdan “WebApp” düyməsi ilə aç.
-      </div>
+    <div class="card danger" id="errCard" style="display:none">
+      <b>Xəta:</b> <span id="errText"></span>
+      <div class="muted" style="margin-top:8px">BotFather URL düzgün olmalıdır və serverdə BOT_TOKEN set edilməlidir.</div>
     </div>
 
-    <div class="card" id="testBlock">
-      <h3 style="margin:0 0 10px 0">Test üçün Telegram ID daxil et</h3>
-      <div class="muted" style="margin-bottom:10px">Telegram daxilində açanda buna ehtiyac yoxdur.</div>
-      <div class="row">
-        <div>
-          <div class="muted" style="margin-bottom:6px">Telegram ID</div>
-          <input id="manualId" placeholder="məs: 123456789" />
-        </div>
-        <div>
-          <div class="muted" style="margin-bottom:6px">Username (optional)</div>
-          <input id="manualUsername" placeholder="məs: ratik1984" />
-        </div>
-      </div>
-      <div style="height:12px"></div>
-      <button id="saveBtn">Yadda saxla</button>
-      <div class="muted" style="margin-top:10px">
-        Alternativ: URL-a belə əlavə edə bilərsən: <code>?from=driver&id=123456789&username=ratik1984</code>
-      </div>
+    <div class="card" id="okCard" style="display:none">
+      <div><b>Verified ✅</b></div>
+      <div class="muted" id="userLine"></div>
     </div>
 
     <div class="card">
-      <div class="muted">Sərnişin: Yerini tap, ünvan yaz, OSRM ilə məsafə hesablanır, qiymət çıxır.</div>
+      <div class="muted">Ride demo (coords ilə)</div>
       <div style="height:10px"></div>
       <div class="row">
-        <div><input placeholder="Pick-up (Yer)" /></div>
-        <div><input placeholder="Drop-off (Gedəcəyin yer)" /></div>
+        <div><input id="fromLat" placeholder="from_lat (məs: 40.4093)" /></div>
+        <div><input id="fromLng" placeholder="from_lng (məs: 49.8671)" /></div>
       </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <div><input id="toLat" placeholder="to_lat" /></div>
+        <div><input id="toLng" placeholder="to_lng" /></div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <div><input id="fromText" placeholder="Pick-up (text)" /></div>
+        <div><input id="toText" placeholder="Drop-off (text)" /></div>
+      </div>
+      <div style="height:12px"></div>
+      <button id="createRideBtn">Ride yarat</button>
     </div>
 
     <div class="card">
@@ -72,73 +64,80 @@
   </div>
 
 <script>
-(function () {
+(async function () {
   const params = new URLSearchParams(location.search);
   const from = params.get("from") || "unknown";
   document.getElementById("fromPill").textContent = "from: " + from;
 
-  const debugEl = document.getElementById("debug");
   const idPill = document.getElementById("idPill");
-  const warnCard = document.getElementById("warnCard");
-  const testBlock = document.getElementById("testBlock");
+  const debugEl = document.getElementById("debug");
+  const errCard = document.getElementById("errCard");
+  const errText = document.getElementById("errText");
+  const okCard = document.getElementById("okCard");
+  const userLine = document.getElementById("userLine");
 
-  function setUser(id, username, source) {
-    if (!id) return;
-    idPill.textContent = "TG ID: " + id;
-    warnCard.style.display = "none";
-    testBlock.style.display = "none";
-    debugEl.textContent =
-      "SOURCE: " + source + "\n" +
-      "id: " + id + "\n" +
-      "username: " + (username || "-") + "\n" +
-      "from: " + from + "\n";
-  }
-
-  // 0) URL ilə test (developer)
-  const urlId = params.get("id");
-  if (urlId) {
-    setUser(urlId, params.get("username") || "", "URL query (test)");
+  const tg = window.Telegram?.WebApp;
+  if (!tg) {
+    idPill.textContent = "TG ID: unknown";
+    errCard.style.display = "block";
+    errText.textContent = "Telegram WebApp tapılmadı (WebApp düyməsi ilə aç).";
     return;
   }
 
-  // 1) Telegram WebApp
-  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  if (tg) {
-    try {
-      tg.ready();
-      tg.expand();
+  tg.ready();
+  tg.expand();
 
-      const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
-      const initData = tg.initData || "";
+  const initData = tg.initData || "";
+  debugEl.textContent = "initData_length: " + initData.length + "\\n";
 
-      debugEl.textContent =
-        "tg_present: yes\n" +
-        "initData_length: " + initData.length + "\n" +
-        "user: " + JSON.stringify(user) + "\n";
-
-      if (user && user.id) {
-        setUser(user.id, user.username, "Telegram initDataUnsafe");
-        return;
-      }
-    } catch (e) {
-      debugEl.textContent = "Telegram error: " + String(e);
+  async function api(path, body) {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      const msg = j.error || ("HTTP " + r.status);
+      throw new Error(msg);
     }
-  } else {
-    debugEl.textContent = "tg_present: no\n";
+    return j;
   }
 
-  // 2) Əgər Telegramdan gəlmirsə -> local test/manual
-  const savedId = localStorage.getItem("pt_tg_id");
-  const savedUsername = localStorage.getItem("pt_tg_username");
-  if (savedId) setUser(savedId, savedUsername, "localStorage");
+  // 1) Verify via backend (SECURE)
+  let user = null;
+  try {
+    const j = await api("/api/verify-telegram", { initData });
+    user = j.user;
+    idPill.textContent = "TG ID: " + user.id;
+    okCard.style.display = "block";
+    userLine.textContent = (user.username ? "@" + user.username : "no username") + " • " + (user.first_name || "") + " " + (user.last_name || "");
+    debugEl.textContent += "verified: yes\\n";
+  } catch (e) {
+    idPill.textContent = "TG ID: unknown";
+    errCard.style.display = "block";
+    errText.textContent = String(e.message || e);
+    debugEl.textContent += "verified: no\\nerror: " + String(e.message || e) + "\\n";
+    return;
+  }
 
-  document.getElementById("saveBtn").addEventListener("click", () => {
-    const id = (document.getElementById("manualId").value || "").trim();
-    const username = (document.getElementById("manualUsername").value || "").trim();
-    if (!id) return alert("Telegram ID daxil et");
-    localStorage.setItem("pt_tg_id", id);
-    localStorage.setItem("pt_tg_username", username);
-    setUser(id, username, "manual input");
+  // 2) Ride create demo
+  document.getElementById("createRideBtn").addEventListener("click", async () => {
+    const payload = {
+      initData,
+      from_lat: document.getElementById("fromLat").value,
+      from_lng: document.getElementById("fromLng").value,
+      to_lat: document.getElementById("toLat").value,
+      to_lng: document.getElementById("toLng").value,
+      from_text: document.getElementById("fromText").value,
+      to_text: document.getElementById("toText").value
+    };
+    try {
+      const j = await api("/api/rides", payload);
+      alert("Ride created: " + JSON.stringify(j.ride));
+    } catch (e) {
+      alert("Xəta: " + String(e.message || e));
+    }
   });
 })();
 </script>
