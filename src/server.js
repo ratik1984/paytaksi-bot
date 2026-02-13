@@ -190,6 +190,27 @@ async function safeFetchJson(url, fetchOpts = {}) {
   }
 }
 
+// Very small in-memory cache to reduce Nominatim calls (helps with rate limits)
+// Key -> { exp:number, data:any }
+const _geoCache = new Map();
+function cacheGet(key) {
+  const v = _geoCache.get(key);
+  if (!v) return null;
+  if (Date.now() > v.exp) {
+    _geoCache.delete(key);
+    return null;
+  }
+  return v.data;
+}
+function cacheSet(key, data, ttlMs = 60_000) {
+  // keep cache small
+  if (_geoCache.size > 400) {
+    const first = _geoCache.keys().next().value;
+    if (first) _geoCache.delete(first);
+  }
+  _geoCache.set(key, { exp: Date.now() + ttlMs, data });
+}
+
 app.get('/api/reverse', async (req, res) => {
   try {
     const lat = Number(req.query.lat);
@@ -229,14 +250,26 @@ app.get('/api/places', async (req, res) => {
     const lon = Number(req.query.lon);
     if (!q || q.length < 3) return res.json({ ok: true, items: [] });
 
+    // Prefer Azerbaijan results; also add a light "Azerbaijan" context if user didn't type it.
+    let q2 = q;
+    const qLower = q2.toLowerCase();
+    const hasAz = qLower.includes('azerba') || qLower.includes('azərbay') || qLower.includes('bakı') || qLower.includes('baki');
+    if (!hasAz) q2 = `${q2}, Azerbaijan`;
+
+    const cacheKey = `places:${q2}|${Number.isNaN(lat) ? '' : lat.toFixed(4)}|${Number.isNaN(lon) ? '' : lon.toFixed(4)}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ ok: true, items: cached });
+
     const url = new URL('https://nominatim.openstreetmap.org/search');
     url.searchParams.set('format', 'jsonv2');
-    url.searchParams.set('q', q);
-    url.searchParams.set('limit', '6');
+    url.searchParams.set('q', q2);
+    url.searchParams.set('limit', '10');
     url.searchParams.set('addressdetails', '1');
+    url.searchParams.set('countrycodes', 'az');
     if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
       url.searchParams.set('viewbox', `${lon - 0.2},${lat + 0.2},${lon + 0.2},${lat - 0.2}`);
-      url.searchParams.set('bounded', '1');
+      // NOTE: don't hard-bound results; just bias to nearby area
+      url.searchParams.set('bounded', '0');
     }
 
     const data = await safeFetchJson(url.toString(), {
@@ -251,6 +284,7 @@ app.get('/api/places', async (req, res) => {
       lat: Number(x.lat),
       lon: Number(x.lon)
     }));
+    cacheSet(cacheKey, items, 60_000);
     res.json({ ok: true, items });
   } catch (e) {
     console.error('places search failed:', e.message, e.status || '', e.contentType || '', e.bodyPreview || '');

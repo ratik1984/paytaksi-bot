@@ -26,6 +26,9 @@
       <button id="btnLoc">📍 Mövcud yerimi avtomatik tap</button>
       <div class="muted" id="locTxt">Yer: —</div>
 
+      <input id="pickupTxt" placeholder="Mövcud yeriniz (GPS ilə avtomatik yazılacaq)" />
+      <div class="list" id="pickupSuggestions"></div>
+
       <input id="dest" placeholder="Gedəcəyiniz yeri yazın (məs: Nizami metro)" />
       <div class="list" id="suggestions"></div>
 
@@ -48,6 +51,8 @@ const statusEl = document.getElementById('status');
 const locTxt = document.getElementById('locTxt');
 const ridesEl = document.getElementById('rides');
 const suggEl = document.getElementById('suggestions');
+const pickupInput = document.getElementById('pickupTxt');
+const pickupSuggEl = document.getElementById('pickupSuggestions');
 
 const u = tgUser();
 who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
@@ -71,11 +76,14 @@ document.getElementById('btnLoc').onclick = () => {
       if (j.ok && (j.name || j.display_name)){
         pickup.text = j.name || j.display_name;
         locTxt.textContent = `Yer: ${pickup.text}`;
+        pickupInput.value = pickup.text;
       } else {
         locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+        pickupInput.value = '';
       }
     }catch(e){
       locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+      pickupInput.value = '';
     }
 
     setStatus(statusEl,'Yer tapıldı ✅');
@@ -84,6 +92,41 @@ document.getElementById('btnLoc').onclick = () => {
   }, { enableHighAccuracy:true, timeout:10000 });
 };
 
+// --- Autocomplete helper
+async function loadSuggestions(q, listEl, onPick){
+  if (!q || q.length < 3){ listEl.innerHTML=''; return; }
+  try{
+    const url = new URL('/api/places', location.origin);
+    url.searchParams.set('q', q);
+    if (pickup){ url.searchParams.set('lat', pickup.lat); url.searchParams.set('lon', pickup.lon); }
+    const r = await fetch(url);
+    const data = await r.json();
+    listEl.innerHTML = '';
+    (data.items||[]).forEach((it)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.textContent = it.title;
+      div.onclick = ()=> onPick(it);
+      listEl.appendChild(div);
+    });
+  }catch(e){ listEl.innerHTML=''; }
+}
+
+let tmrPick = null;
+pickupInput.addEventListener('input', (e)=>{
+  clearTimeout(tmrPick);
+  const q = e.target.value.trim();
+  tmrPick = setTimeout(()=>{
+    loadSuggestions(q, pickupSuggEl, (it)=>{
+      // Allow user to override pickup by selecting a nearby place
+      pickup = { lat: it.lat, lon: it.lon, text: it.title };
+      pickupInput.value = it.title;
+      locTxt.textContent = `Yer: ${it.title}`;
+      pickupSuggEl.innerHTML='';
+    });
+  }, 250);
+});
+
 
 let tmr = null;
 document.getElementById('dest').addEventListener('input', (e)=>{
@@ -91,25 +134,11 @@ document.getElementById('dest').addEventListener('input', (e)=>{
   const q = e.target.value.trim();
   if (q.length < 3){ suggEl.innerHTML=''; drop=null; return; }
   tmr = setTimeout(async ()=>{
-    try{
-      const url = new URL('/api/places', location.origin);
-      url.searchParams.set('q', q);
-      if (pickup){ url.searchParams.set('lat', pickup.lat); url.searchParams.set('lon', pickup.lon); }
-      const r = await fetch(url);
-      const data = await r.json();
-      suggEl.innerHTML = '';
-      (data.items||[]).forEach((it)=>{
-        const div = document.createElement('div');
-        div.className='item';
-        div.textContent = it.title;
-        div.onclick = ()=>{
-          drop = { lat: it.lat, lon: it.lon, text: it.title };
-          document.getElementById('dest').value = it.title;
-          suggEl.innerHTML='';
-        };
-        suggEl.appendChild(div);
-      });
-    }catch(e){}
+    loadSuggestions(q, suggEl, (it)=>{
+      drop = { lat: it.lat, lon: it.lon, text: it.title };
+      document.getElementById('dest').value = it.title;
+      suggEl.innerHTML='';
+    });
   }, 250);
 });
 
