@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="mb-3">TopUp Sorğuları</h2>
+<div class="table-responsive">
+<table class="table table-striped align-middle">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Driver User ID</th>
+      <th>Məbləğ (AZN)</th>
+      <th>Metod</th>
+      <th>Status</th>
+      <th>Tarix</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in items %}
+    <tr>
+      <td>{{ t.id }}</td>
+      <td><a href="/admin/driver/{{ t.driver_user_id }}">{{ t.driver_user_id }}</a></td>
+      <td>{{ '%.2f'|format(t.amount_azn) }}</td>
+      <td>{{ t.method }}</td>
+      <td>
+        {% if t.status == 'pending' %}
+          <span class="badge text-bg-warning">pending</span>
+        {% elif t.status == 'approved' %}
+          <span class="badge text-bg-success">approved</span>
+        {% else %}
+          <span class="badge text-bg-secondary">{{ t.status }}</span>
+        {% endif %}
+      </td>
+      <td>{{ t.created_at }}</td>
+      <td>
+        {% if t.status == 'pending' %}
+        <form class="d-inline" method="post" action="/admin/topup/{{ t.id }}/approve">
+          <button class="btn btn-sm btn-success">Approve</button>
+        </form>
+        <form class="d-inline" method="post" action="/admin/topup/{{ t.id }}/reject">
+          <button class="btn btn-sm btn-outline-danger">Reject</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

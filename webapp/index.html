@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="title">🚕 PayTaksi</div>
+      <div class="sub" id="modeLabel">...</div>
+    </header>
+
+    <main class="content">
+      <div id="toast" class="toast hidden"></div>
+
+      <section id="passengerPanel" class="panel hidden">
+        <h2>Sərnişin</h2>
+        <div class="card">
+          <div class="row">
+            <button id="btnGetLoc" class="btn">📍 Yerimi təyin et</button>
+            <div class="muted" id="locText">Yer seçilməyib</div>
+          </div>
+          <div class="field">
+            <label>Gedəcəyiniz yer</label>
+            <input id="destInput" placeholder="Məs: 28 May metro" autocomplete="off" />
+            <div id="suggestions" class="suggestions"></div>
+          </div>
+          <div class="row">
+            <button id="btnQuote" class="btn secondary">Qiymət hesabla</button>
+            <button id="btnOrder" class="btn" disabled>🚕 Sifariş et</button>
+          </div>
+          <div class="muted" id="quoteText">Qiymət: —</div>
+          <div class="muted" id="rideText"></div>
+        </div>
+      </section>
+
+      <section id="driverPanel" class="panel hidden">
+        <h2>Sürücü</h2>
+        <div class="card">
+          <div class="muted" id="driverStatus">Yüklənir...</div>
+          <div class="row">
+            <button id="btnDriverInit" class="btn secondary">Yenilə</button>
+            <button id="btnOnline" class="btn" disabled>Online et</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Qeydiyyat</h3>
+          <div class="field">
+            <label>Avtomobil buraxılış ili (min 2010)</label>
+            <input id="carYear" type="number" min="2010" value="2010" />
+          </div>
+          <div class="field">
+            <label>Rəng</label>
+            <select id="carColor">
+              <option>ağ</option><option>qara</option><option>qırmızı</option><option>boz</option><option>mavi</option><option>sarı</option><option>yaşıl</option>
+            </select>
+          </div>
+          <button id="btnRegister" class="btn">Qeydiyyatı göndər (Pending)</button>
+          <div class="muted">Admin təsdiqindən sonra sifariş ala bilərsiniz.</div>
+        </div>
+
+        <div class="card">
+          <h3>Sənədlər</h3>
+          <div class="muted">Hər sənəd üçün ön+arxa şəkil yüklə.</div>
+          <div class="docgrid">
+            <div class="docitem">
+              <div class="docTitle">Şəxsiyyət (ön)</div>
+              <input type="file" id="idFront" accept="image/*" />
+              <button class="btn secondary" data-upload="id_card" data-side="front" data-input="idFront">Yüklə</button>
+            </div>
+            <div class="docitem">
+              <div class="docTitle">Şəxsiyyət (arxa)</div>
+              <input type="file" id="idBack" accept="image/*" />
+              <button class="btn secondary" data-upload="id_card" data-side="back" data-input="idBack">Yüklə</button>
+            </div>
+            <div class="docitem">
+              <div class="docTitle">Sürücülük (ön)</div>
+              <input type="file" id="dlFront" accept="image/*" />
+              <button class="btn secondary" data-upload="driver_license" data-side="front" data-input="dlFront">Yüklə</button>
+            </div>
+            <div class="docitem">
+              <div class="docTitle">Sürücülük (arxa)</div>
+              <input type="file" id="dlBack" accept="image/*" />
+              <button class="btn secondary" data-upload="driver_license" data-side="back" data-input="dlBack">Yüklə</button>
+            </div>
+            <div class="docitem">
+              <div class="docTitle">Texniki pasport (ön)</div>
+              <input type="file" id="tpFront" accept="image/*" />
+              <button class="btn secondary" data-upload="tech_passport" data-side="front" data-input="tpFront">Yüklə</button>
+            </div>
+            <div class="docitem">
+              <div class="docTitle">Texniki pasport (arxa)</div>
+              <input type="file" id="tpBack" accept="image/*" />
+              <button class="btn secondary" data-upload="tech_passport" data-side="back" data-input="tpBack">Yüklə</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Balans artır</h3>
+          <div class="field">
+            <label>Məbləğ (AZN)</label>
+            <input id="topupAmount" type="number" min="1" step="0.01" value="5" />
+          </div>
+          <div class="field">
+            <label>Metod</label>
+            <select id="topupMethod">
+              <option value="card2card">Kart → Kart</option>
+              <option value="m10">m10</option>
+            </select>
+          </div>
+          <button id="btnTopup" class="btn">TopUp sorğusu yarat</button>
+          <div class="muted">Admin paneldən təsdiqlənəcək.</div>
+        </div>
+
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button id="btnClose" class="btn ghost">Bağla</button>
+    </footer>
+  </div>
+
+<script src="./app.js"></script>
+</body>
+</html>

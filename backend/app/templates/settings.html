@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="mb-3">Settings</h2>
+<div class="alert alert-info">
+  Bu prototipdə settings <b>ENV</b> ilə idarə olunur (Render "Environment" bölməsi).
+</div>
+<ul class="list-group">
+  <li class="list-group-item d-flex justify-content-between"><span>Komissiya</span><b>{{ (settings.COMMISSION_RATE * 100) | round(0) }}%</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Başlanğıc qiymət</span><b>{{ settings.BASE_FARE_AZN }} AZN</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Baza məsafə</span><b>{{ settings.BASE_DISTANCE_KM }} km</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Əlavə hər km</span><b>{{ settings.PER_KM_AZN }} AZN</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Driver min balans</span><b>{{ settings.DRIVER_MIN_BALANCE }} AZN</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Matching radius</span><b>{{ settings.MATCH_RADIUS_KM }} km</b></li>
+  <li class="list-group-item d-flex justify-content-between"><span>Min avtomobil ili</span><b>{{ settings.DRIVER_MIN_CAR_YEAR }}</b></li>
+  <li class="list-group-item"><span>Rənglər:</span> <b>{{ settings.DRIVER_ALLOWED_COLORS }}</b></li>
+</ul>
+{% endblock %}
