@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi Admin Panel</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:0; background:#0b0f19; color:#fff}
+    .wrap{max-width:980px;margin:20px auto;padding:20px}
+    .card{background:#121a2a;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin:12px 0}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}
+    a{color:#8ab4ff}
+    .muted{color:rgba(255,255,255,.7);font-size:14px}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Admin Panel</h2>
+    <div class="muted">Bu prototip panel: rides list + settings göstərişi. Sonra genişləndirəcəyik.</div>
+
+    <div class="row">
+      <div class="card">
+        <h3>Settings</h3>
+        <div class="muted">Komissiya: 10% | Start: 3.50 | 3km sonrası: 0.40/km | Driver limit: -10</div>
+      </div>
+      <div class="card">
+        <h3>Linklər</h3>
+        <div><a href="/webapp/?from=passenger" target="_blank">Passenger WebApp</a></div>
+        <div><a href="/webapp/?from=driver" target="_blank">Driver WebApp</a></div>
+        <div><a href="/admin/logout">Çıxış</a></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Son sifarişlər (rides)</h3>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Pickup</th><th>Dropoff</th><th>Status</th><th>Price</th><th>Created</th></tr>
+        </thead>
+        <tbody>
+        {% for r in rides %}
+          <tr>
+            <td>{{r["id"]}}</td>
+            <td>{{r["pickup"]}}</td>
+            <td>{{r["dropoff"]}}</td>
+            <td>{{r["status"]}}</td>
+            <td>{{r["price"]}}</td>
+            <td>{{r["created_at"]}}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
