@@ -82,6 +82,7 @@ const BASE_FARE = 3.50;
 const BASE_KM = 3.0;
 const PER_KM_AFTER = 0.40;
 const DRIVER_BLOCK_AT = -10.0;
+const OFFER_TIMEOUT_SEC = Number(process.env.OFFER_TIMEOUT_SEC || 20);
 
 function money2(x) {
   return Math.round((Number(x) + Number.EPSILON) * 100) / 100;
@@ -314,6 +315,19 @@ async function ensureDispatchTables(){
     );
   `).catch(()=>{});
   await pool.query(`INSERT INTO dispatch_state(id,last_driver_id) VALUES (1,NULL) ON CONFLICT (id) DO NOTHING;`).catch(()=>{});
+  // --- Offer/timeout dispatch (additive)
+  await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS offered_driver_id BIGINT;`).catch(()=>{});
+  await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS offer_expires_at TIMESTAMPTZ;`).catch(()=>{});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_rides_offer_expires ON rides(offer_expires_at);`).catch(()=>{});
+  await pool.query(`CREATE TABLE IF NOT EXISTS ride_offer_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    ride_id BIGINT NOT NULL,
+    driver_id BIGINT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('reject','timeout','accept')),
+    decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`).catch(()=>{});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_offer_attempts_ride ON ride_offer_attempts(ride_id, driver_id);`).catch(()=>{});
+
 }
 
 function dist2(aLat, aLon, bLat, bLon){
@@ -324,6 +338,7 @@ function dist2(aLat, aLon, bLat, bLon){
 
 async function autoAssignRide(rideId){
   await ensureDispatchTables();
+startOfferExpiryLoop();
   const client = await pool.connect();
   try{
     await client.query('BEGIN');
@@ -331,12 +346,17 @@ async function autoAssignRide(rideId){
     await client.query('SELECT pg_advisory_xact_lock(424242)');
 
     const rideQ = await client.query(
-      `SELECT id, status, pickup_lat, pickup_lon, pickup_text, drop_text, distance_km, fare
+      `SELECT id, status, pickup_lat, pickup_lon, pickup_text, drop_text, distance_km, fare, offered_driver_id, offer_expires_at
        FROM rides WHERE id=$1 FOR UPDATE`,
       [rideId]
     );
     const ride = rideQ.rows[0];
     if (!ride || ride.status !== 'searching') {
+      await client.query('COMMIT');
+      return null;
+    }
+    // If an unexpired offer already exists, don't re-offer yet
+    if (ride.offered_driver_id && ride.offer_expires_at && new Date(ride.offer_expires_at).getTime() > Date.now()) {
       await client.query('COMMIT');
       return null;
     }
@@ -351,7 +371,7 @@ async function autoAssignRide(rideId){
          AND d.balance > $1
          AND NOT EXISTS (SELECT 1 FROM rides r WHERE r.driver_id=d.id AND r.status IN ('assigned','started'))
        ORDER BY d.id ASC`,
-      [DRIVER_BLOCK_AT]
+      [DRIVER_BLOCK_AT, ride.id]
     );
     const drivers = driversQ.rows;
     if (!drivers.length) {
@@ -380,10 +400,10 @@ async function autoAssignRide(rideId){
 
     const upd = await client.query(
       `UPDATE rides
-       SET driver_id=$1, status='assigned', updated_at=NOW()
+       SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
        WHERE id=$2 AND status='searching'
        RETURNING *`,
-      [chosen.id, ride.id]
+      [chosen.id, ride.id, String(OFFER_TIMEOUT_SEC)]
     );
     const assignedRide = upd.rows[0];
     await client.query('COMMIT');
@@ -391,12 +411,13 @@ async function autoAssignRide(rideId){
     if (assignedRide?.id && chosen?.driver_tg_id) {
       const pt = signPtToken(chosen.driver_tg_id, 'driver');
       const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
-      const msg = `🚖 Yeni sifariş (#${assignedRide.id})\n` +
+      const msg = `🚖 Yeni sifariş təklifi (#${assignedRide.id})\n` +
         `${assignedRide.pickup_text || 'Pick-up'} → ${assignedRide.drop_text || 'Drop'}\n` +
         `Məsafə: ${Number(assignedRide.distance_km).toFixed(2)} km\n` +
-        `Qiymət: ${Number(assignedRide.fare).toFixed(2)} AZN`;
+        `Qiymət: ${Number(assignedRide.fare).toFixed(2)} AZN\n` +
+        `⏳ ${OFFER_TIMEOUT_SEC} saniyə ərzində qəbul edin (yoxsa başqa sürücüyə keçəcək).`;
       await sendTelegramToRole('driver', chosen.driver_tg_id, msg, {
-        ...webAppButton('🚖 Sifarişi aç', url)
+        ...webAppButton('🚖 Təklifi aç', url)
       });
     }
 
@@ -407,6 +428,65 @@ async function autoAssignRide(rideId){
   } finally {
     client.release();
   }
+}
+
+
+async function ensureOfferTables(){
+  // piggy-back on dispatch tables
+  await ensureDispatchTables();
+startOfferExpiryLoop();
+}
+
+// Expire offered rides and re-offer to next drivers (best-effort)
+let _expiringOffers = false;
+async function expireOffersOnce(limit = 10){
+  if (_expiringOffers) return;
+  _expiringOffers = true;
+  try{
+    await ensureOfferTables();
+    const client = await pool.connect();
+    try{
+      await client.query('BEGIN');
+      const q = await client.query(
+        `SELECT id, offered_driver_id
+         FROM rides
+         WHERE status='searching'
+           AND offered_driver_id IS NOT NULL
+           AND offer_expires_at IS NOT NULL
+           AND offer_expires_at < NOW()
+         ORDER BY offer_expires_at ASC
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [limit]
+      );
+      const rows = q.rows || [];
+      for (const r of rows){
+        await client.query(
+          `INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'timeout')`,
+          [r.id, r.offered_driver_id]
+        ).catch(()=>{});
+        await client.query(
+          `UPDATE rides SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW()
+           WHERE id=$1`,
+          [r.id]
+        );
+      }
+      await client.query('COMMIT');
+      for (const r of rows){
+        try{ await autoAssignRide(Number(r.id)); }catch(_){}
+      }
+    }catch(e){
+      try{ await client.query('ROLLBACK'); }catch{}
+    }finally{
+      client.release();
+    }
+  } finally {
+    _expiringOffers = false;
+  }
+}
+
+function startOfferExpiryLoop(){
+  setInterval(()=>{ expireOffersOnce(10).catch(()=>{}); }, 5000);
 }
 
 function getDriverToken(req){
@@ -707,6 +787,7 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
   let ride = rideQ.rows[0];
   // Auto-assign to an eligible online driver (best-effort; keeps "searching" if none)
   try{
+    await expireOffersOnce(10).catch(()=>{});
     const assigned = await autoAssignRide(ride.id);
     if (assigned?.ride) ride = assigned.ride;
   }catch(e){
@@ -944,6 +1025,8 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
     }
     await pool.query('COMMIT');
 
+    await expireOffersOnce(10).catch(()=>{});
+
     // If driver just went online, try to auto-assign the oldest searching ride (best-effort)
     if (want) {
       try{
@@ -984,12 +1067,29 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), requireDriverSessio
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.json({ ok: true, rides: [], note: 'balance_blocked' });
 
   // If online/offline columns exist, show rides only when online
+  await expireOffersOnce(10).catch(()=>{});
+
   if (await driversHaveOnlineCols()){
     if (!driver.is_online) return res.json({ ok:true, rides: [], offline:true });
   }
 
-  const q = await pool.query(`SELECT * FROM rides WHERE status='searching' ORDER BY id DESC LIMIT 10`);
-  res.json({ ok: true, rides: q.rows });
+  const offersQ = await pool.query(
+    `SELECT * FROM rides
+     WHERE status='searching'
+       AND offered_driver_id=$1
+       AND offer_expires_at IS NOT NULL
+       AND offer_expires_at > NOW()
+     ORDER BY offer_expires_at ASC LIMIT 5`,
+    [driver.id]
+  ).catch(()=>({rows:[] }));
+
+  const q = await pool.query(
+    `SELECT * FROM rides
+     WHERE status='searching'
+       AND (offered_driver_id IS NULL OR offer_expires_at IS NULL OR offer_expires_at < NOW())
+     ORDER BY id DESC LIMIT 10`
+  );
+  res.json({ ok: true, offers: offersQ.rows||[], rides: q.rows });
 });
 
 // driver: accept ride
@@ -1003,13 +1103,39 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
   const rideQ = await pool.query(
-    `UPDATE rides SET driver_id=$1, status='assigned', updated_at=NOW()
+    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
      WHERE id=$2 AND status='searching'
      RETURNING *`,
     [driver.id, ride_id]
   );
   if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
+  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
   res.json({ ok: true, ride: rideQ.rows[0] });
+});
+
+
+// driver: reject offered ride (or free up an active offer) and re-offer to someone else
+app.post('/api/driver/reject', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+  const { ride_id } = req.body || {};
+  const user = await upsertUser(req.tgUser, 'driver');
+  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
+  const driver = dQ.rows[0];
+  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
+
+  const q = await pool.query(
+    `UPDATE rides
+     SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW()
+     WHERE id=$1 AND status='searching' AND offered_driver_id=$2
+     RETURNING *`,
+    [ride_id, driver.id]
+  );
+  if (!q.rows[0]) return res.status(409).json({ ok:false, error:'not_offered_to_you' });
+
+  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'reject')`, [ride_id, driver.id]).catch(()=>{});
+
+  try{ await autoAssignRide(Number(ride_id)); }catch(_){}
+
+  return res.json({ ok:true });
 });
 
 // driver: start
@@ -1214,6 +1340,7 @@ const PORT = process.env.PORT || 10000;
 await ensureSchema();
 // Additive: ensure optional tables/columns for dispatch are present.
 await ensureDispatchTables();
+startOfferExpiryLoop();
 
 app.listen(PORT, () => {
   console.log(`PayTaksi server listening on :${PORT}`);

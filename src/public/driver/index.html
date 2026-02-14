@@ -212,6 +212,10 @@ async function refreshAfterLogin(){
     setOnlineUI(false);
   }
   await loadOpenRides();
+  // auto refresh offers/open rides
+  if (!window.__ridesTimer){
+    window.__ridesTimer = setInterval(()=>{ try{ loadOpenRides(); }catch(_){} }, 5000);
+  }
 }
 
 document.getElementById('btnGoOnline').onclick = async ()=>{
@@ -338,6 +342,39 @@ async function loadOpenRides(){
       return;
     }
     if (data.note) ridesEl.innerHTML = `<div class="muted">Qeyd: ${data.note}</div>`;
+
+    // 1) Offers (must accept/reject within timeout)
+    (data.offers||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      const exp = r.offer_expires_at ? new Date(r.offer_expires_at).getTime() : 0;
+      const left = exp ? Math.max(0, Math.ceil((exp - Date.now())/1000)) : 0;
+      div.innerHTML = `<b>#${r.id}</b> • teklif<br>
+      ${r.pickup_text||''} → ${r.drop_text||''}<br>
+      Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+      <div class="muted">⏳ Qalan: <b>${left}s</b></div>
+      <div class="two" style="margin-top:6px">
+        <button data-acc="${r.id}">✅ Qəbul et</button>
+        <button data-rej="${r.id}" class="danger">❌ Rədd et</button>
+      </div>`;
+      div.querySelector('[data-acc]').onclick = async ()=>{
+        try{
+          await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
+          alert('Qəbul edildi ✅');
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      div.querySelector('[data-rej]').onclick = async ()=>{
+        if (!confirm('Bu sifarişi rədd edirsiniz?')) return;
+        try{
+          await api('/api/driver/reject',{method:'POST',body:{ride_id:r.id}});
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      ridesEl.appendChild(div);
+    });
+
+    // 2) Free searching rides (manual accept)
     (data.rides||[]).forEach((r)=>{
       const div = document.createElement('div');
       div.className='item';
@@ -354,9 +391,9 @@ async function loadOpenRides(){
       };
       ridesEl.appendChild(div);
     });
-    if (!(data.rides||[]).length) ridesEl.innerHTML += '<div class="muted">Açıq sifariş yoxdur.</div>';
+
+    if (!(data.offers||[]).length && !(data.rides||[]).length) ridesEl.innerHTML += '<div class="muted">Açıq sifariş yoxdur.</div>';
   }catch(e){
-    // likely need_login
     if (e.data?.error === 'need_login') {
       show(driverArea,false);
     }
