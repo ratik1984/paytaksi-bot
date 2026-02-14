@@ -54,25 +54,6 @@ const suggEl = document.getElementById('suggestions');
 const pickupInput = document.getElementById('pickupTxt');
 const pickupSuggEl = document.getElementById('pickupSuggestions');
 
-// Event delegation for cancel button (more reliable in mobile WebViews)
-async function handleCancelEvent(e){
-  const btn = e.target?.closest?.('[data-cancel]');
-  if (!btn) return;
-  e.preventDefault?.();
-  e.stopPropagation?.();
-  const rideId = Number(btn.getAttribute('data-cancel'));
-  if (!rideId) return;
-  try {
-    await api('/api/passenger/cancel_ride', { method:'POST', body:{ ride_id: rideId } });
-    setStatus(statusEl, `Sifariş #${rideId} ləğv edildi.`);
-    await loadRides();
-  } catch (err) {
-    alert(err?.message || String(err));
-  }
-}
-ridesEl.addEventListener('click', handleCancelEvent, { passive:false });
-ridesEl.addEventListener('touchend', handleCancelEvent, { passive:false });
-
 const u = tgUser();
 who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
 
@@ -201,45 +182,9 @@ document.getElementById('btnCreate').onclick = async ()=>{
     setStatus(statusEl,`Sifariş #${data.ride.id} yaradıldı. Təxmini qiymət: ${data.ride.fare} AZN (komissiya: ${data.ride.commission} AZN)`);
     await loadRides();
   }catch(e){
-    // If there is already an active ride, show a clearer message.
-    if (e.data?.error === 'active_ride_exists'){
-      setStatus(statusEl, `Artıq aktiv sifarişiniz var (#${e.data.ride_id}). Yeni sifariş üçün əvvəlkini ləğv edin və ya tamamlanmasını gözləyin.`, false);
-      await loadRides();
-    } else {
-      setStatus(statusEl,'Xəta: '+(e.data?.reason||e.data?.error||e.message), false);
-    }
+    setStatus(statusEl,'Xəta: '+(e.data?.reason||e.data?.error||e.message), false);
   }
 };
-
-// Cancel button handler (works reliably on mobile/Telegram webview)
-// Use event delegation instead of per-button listeners.
-function onCancelClick(e){
-  const btn = e.target.closest('button[data-cancel]');
-  if (!btn) return;
-  e.preventDefault();
-  e.stopPropagation();
-  if (btn.disabled) return;
-  btn.disabled = true;
-  (async ()=>{
-    try{
-      const rideId = Number(btn.dataset.cancel);
-      const res = await api('/api/passenger/cancel_ride', { ride_id: rideId });
-      if (res.ok){
-        toast('Sifariş ləğv edildi');
-        await loadRides();
-      } else {
-        toast(res.error || 'Ləğv etmək alınmadı');
-      }
-    }catch(err){
-      toast('Şəbəkə xətası');
-    } finally {
-      btn.disabled = false;
-    }
-  })();
-}
-ridesEl.addEventListener('click', onCancelClick);
-ridesEl.addEventListener('pointerup', onCancelClick);
-ridesEl.addEventListener('touchend', onCancelClick, { passive: false });
 
 async function loadRides(){
   try{
@@ -249,18 +194,10 @@ async function loadRides(){
       const div = document.createElement('div');
       div.className='item';
       const drv = r.driver_id ? `Sürücü: ${r.driver_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
-
-      // Only allow cancel while the ride is still waiting for a driver.
-      const canCancel = (r.status === 'searching' || r.status === 'assigned');
-      const cancelBtn = canCancel
-        ? `<div style="margin-top:10px;"><button class="btn secondary" data-cancel="${r.id}">Sifarişi ləğv et</button></div>`
-        : '';
-
       div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN<br>
-        <span class="muted">${drv}</span>
-        ${cancelBtn}`;
+        <span class="muted">${drv}</span>`;
       ridesEl.appendChild(div);
     });
     if (!data.rides?.length) ridesEl.innerHTML = '<div class="muted">Hələ sifariş yoxdur.</div>';
@@ -269,4 +206,5 @@ async function loadRides(){
 loadRides();
 setInterval(loadRides, 4000);
 </script>
-  <script src="../assets/common.js">
+</body>
+</html>

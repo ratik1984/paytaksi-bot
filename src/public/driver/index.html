@@ -15,12 +15,7 @@
     .muted{color:#666;font-size:13px}
     .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  
-.chatbox{background:#0f1822;border:1px dashed rgba(255,255,255,.25);border-radius:14px;padding:10px;max-height:180px;overflow:auto;font-size:14px;}
-.chatmsg{margin:6px 0;}
-.chatmsg .meta{opacity:.65;font-size:12px;}
-.chatmsg.me{font-weight:600;}
-</style>
+  </style>
 </head>
 <body>
   <h2>PayTaksi 🚖</h2>
@@ -78,32 +73,6 @@
   </div>
 
 <script>
-async function loadActiveRide(){
-  const res = await api('/api/driver/active_ride');
-  const box = document.getElementById('activeRide');
-  if (!box) return;
-  if (!res.ok || !res.ride){
-    box.style.display='none';
-    return;
-  }
-  const r = res.ride;
-  box.style.display='block';
-  box.innerHTML = `
-    <div class="row"><div><b>#${r.id}</b> • ${r.status}</div><div style="opacity:.75">${r.passenger_first_name || 'Sərnişin'}</div></div>
-    <div style="margin-top:8px;opacity:.85">${escapeHtml(r.from_text)} → ${escapeHtml(r.to_text)}</div>
-    <div style="margin-top:6px;opacity:.85">Məsafə: ${Number(r.distance_km || 0).toFixed(2)} km • Qiymət: ${Number(r.price_azn || 0).toFixed(2)} AZN</div>
-    <button class="btn secondary" data-openchat="${r.id}" style="margin-top:10px;">Yazışma</button>
-    <div class="chat" id="chat-${r.id}" style="display:none;margin-top:10px;">
-      <div class="chatbox" id="chatbox-${r.id}"></div>
-      <div style="display:flex;gap:8px;margin-top:8px;">
-        <input class="input" id="chatinput-${r.id}" placeholder="Mesaj yaz..." style="flex:1;" />
-        <button class="btn primary" data-sendchat="${r.id}" style="width:auto;">Göndər</button>
-      </div>
-    </div>
-  `;
-}
-
-
 Telegram.WebApp.ready();
 Telegram.WebApp.expand();
 
@@ -187,7 +156,6 @@ async function loadOpenRides(){
           const rr = await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
           alert('Qəbul edildi. İndi Start/Complete üçün Admin paneldən və ya gələcək versiyada burdan idarə olunacaq.');
           await loadOpenRides();
-  await loadActiveRide();
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
       ridesEl.appendChild(div);
@@ -198,75 +166,7 @@ async function loadOpenRides(){
 
 loadMe();
 loadOpenRides();
-
-
-let openChatRideId = null;
-let lastMsgId = 0;
-let chatTimer = null;
-
-function fmtTime(ts){
-  try { return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); } catch { return ''; }
-}
-
-async function fetchNewMessages(rideId){
-  const res = await api(`/api/driver/ride_messages?ride_id=${rideId}&after_id=${lastMsgId}`);
-  if (!res.ok) return;
-  const box = document.getElementById(`chatbox-${rideId}`);
-  if (!box) return;
-  for (const m of res.messages){
-    lastMsgId = Math.max(lastMsgId, m.id);
-    const div = document.createElement('div');
-    div.className = 'chatmsg ' + (m.sender_role === 'driver' ? 'me' : 'them');
-    div.innerHTML = `<div>${escapeHtml(m.message)}</div><div class="meta">${m.sender_role === 'driver' ? 'Mən' : 'Sərnişin'} • ${fmtTime(m.created_at)}</div>`;
-    box.appendChild(div);
-  }
-  if (res.messages.length) box.scrollTop = box.scrollHeight;
-}
-
-function openChat(rideId){
-  if (openChatRideId && openChatRideId !== rideId){
-    const prev = document.getElementById(`chat-${openChatRideId}`);
-    if (prev) prev.style.display='none';
-  }
-  openChatRideId = rideId;
-  lastMsgId = 0;
-  const el = document.getElementById(`chat-${rideId}`);
-  if (!el) return;
-  el.style.display = (el.style.display==='none' || !el.style.display) ? 'block' : 'none';
-  const visible = el.style.display !== 'none';
-  if (chatTimer) clearInterval(chatTimer);
-  if (visible){
-    const box = document.getElementById(`chatbox-${rideId}`);
-    if (box) box.innerHTML='';
-    fetchNewMessages(rideId);
-    chatTimer = setInterval(() => fetchNewMessages(rideId), 2500);
-  } else {
-    openChatRideId = null;
-  }
-}
-
-document.addEventListener('click', async (e) => {
-  const rideId = e.target?.dataset?.openchat;
-  if (rideId){
-    openChat(Number(rideId));
-    return;
-  }
-  const sendId = e.target?.dataset?.sendchat;
-  if (sendId){
-    const id = Number(sendId);
-    const inp = document.getElementById(`chatinput-${id}`);
-    const text = (inp?.value || '').trim();
-    if (!text) return;
-    inp.value='';
-    const r = await api('/api/driver/ride_message', { method:'POST', body: JSON.stringify({ ride_id:id, text }) });
-    if (!r.ok){
-      showStatus('Mesaj göndərmək olmadı: ' + (r.error || 'xəta'), true);
-      return;
-    }
-    await fetchNewMessages(id);
-  }
-});
-
 setInterval(()=>{loadMe();loadOpenRides();}, 5000);
 </script>
-  <script src="../assets/common.js">
+</body>
+</html>

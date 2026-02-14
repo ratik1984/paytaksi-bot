@@ -9,7 +9,6 @@ import multer from 'multer';
 import { pool } from './db.js';
 import { validateTelegramWebAppData } from './telegramAuth.js';
 import { Telegraf, Markup } from 'telegraf';
-import crypto from 'crypto';
 
 dotenv.config();
 
@@ -25,45 +24,6 @@ app.use(express.urlencoded({ extended: true }));
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'CHANGE_ME_SECRET';
-
-// --- Signed token fallback for WebApp auth when Telegram initData is empty ---
-// Token: base64url(JSON payload) + '.' + base64url(HMAC_SHA256(payloadB64, WEBHOOK_SECRET))
-// Payload: { uid:number, role:'passenger'|'driver'|'admin', iat:number }
-function b64urlEncode(input) {
-  return Buffer.from(input)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
-function b64urlDecode(str) {
-  const s = String(str).replace(/-/g, '+').replace(/_/g, '/');
-  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
-  return Buffer.from(s + pad, 'base64');
-}
-function signPtToken(uid, role) {
-  const payloadObj = { uid: Number(uid), role, iat: Math.floor(Date.now() / 1000) };
-  const payloadB64 = b64urlEncode(JSON.stringify(payloadObj));
-  const sig = crypto.createHmac('sha256', WEBHOOK_SECRET).update(payloadB64).digest();
-  const sigB64 = b64urlEncode(sig);
-  return `${payloadB64}.${sigB64}`;
-}
-function verifyPtToken(token) {
-  try {
-    const [payloadB64, sigB64] = String(token || '').split('.');
-    if (!payloadB64 || !sigB64) return { ok: false, reason: 'bad_token_format' };
-    const expected = crypto.createHmac('sha256', WEBHOOK_SECRET).update(payloadB64).digest();
-    const got = b64urlDecode(sigB64);
-    if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected)) return { ok: false, reason: 'bad_token_signature' };
-    const payload = JSON.parse(b64urlDecode(payloadB64).toString('utf8'));
-    if (!payload?.uid || !payload?.role || !payload?.iat) return { ok: false, reason: 'bad_token_payload' };
-    const age = Math.floor(Date.now() / 1000) - Number(payload.iat);
-    if (age < 0 || age > 7 * 24 * 3600) return { ok: false, reason: 'token_expired' };
-    return { ok: true, payload };
-  } catch {
-    return { ok: false, reason: 'token_parse_failed' };
-  }
-}
 
 const TOKENS = {
   passenger: process.env.PASSENGER_BOT_TOKEN,
@@ -140,24 +100,21 @@ function webAppButton(text, url) {
 
 if (passengerBot) {
   passengerBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'passenger');
-    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/passenger/`;
     await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Sifariş et', url));
   });
 }
 
 if (driverBot) {
   driverBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'driver');
-    const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/driver/`;
     await ctx.reply('PayTaksi 🚖\nSürücü paneli açılır:', webAppButton('🚖 Sürücü paneli', url));
   });
 }
 
 if (adminBot) {
   adminBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'admin');
-    const url = `${APP_BASE_URL}/app/admin/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/admin/`;
     await ctx.reply('PayTaksi 🛠\nAdmin panel açılır:', webAppButton('🛠 Admin panel', url));
   });
 }
@@ -171,24 +128,6 @@ if (adminBot) app.use(adminBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/admin
 function requireTelegram(role) {
   return (req, res, next) => {
     const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
-
-    // Fallback: signed token from query/header (useful if Telegram initData is empty on some clients)
-    if (!initData) {
-      const pt = req.headers['x-pt-token'] || req.body?.pt || req.query?.pt;
-      if (pt) {
-        const v = verifyPtToken(pt);
-        if (v.ok) {
-          if (v.payload.role !== role) {
-            return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'role_mismatch' });
-          }
-          req.tgInitData = '';
-          req.tgUser = { id: Number(v.payload.uid) };
-          req.tgUnsafe = true;
-          req.ptToken = pt;
-          return next();
-        }
-      }
-    }
 
     // Fallback: allow "unsafe" mode when initData is not present (no hash verification).
     if (!initData) {
