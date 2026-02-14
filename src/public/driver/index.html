@@ -71,9 +71,17 @@
       <input id="loginPhone" placeholder="Telefon" />
       <input id="loginPass" type="password" placeholder="Şifrə" />
       <button id="btnLogin">🔐 Daxil ol</button>
-      <button id="btnLogout" class="danger hide">🚪 Çıxış</button>
       <div class="muted" id="loginStatus">—</div>
       <div class="muted">Qeyd: Telegram hesabınızla bağlıdır. Telefon və şifrə yalnız bu sürücü hesabı üçün işləyir.</div>
+    </div>
+  </div>
+
+  <!-- Session mini card (visible after login) -->
+  <div class="card hide" id="cardSession">
+    <b>Sessiya</b>
+    <div class="row">
+      <div class="muted" id="sessionStatus">—</div>
+      <button id="btnLogout" class="danger">🚪 Çıxış</button>
     </div>
   </div>
 
@@ -108,10 +116,12 @@ const accEl = document.getElementById('acc');
 
 const cardReg = document.getElementById('cardReg');
 const cardLogin = document.getElementById('cardLogin');
+const cardSession = document.getElementById('cardSession');
 const driverArea = document.getElementById('driverArea');
 
 const regStatus = document.getElementById('regStatus');
 const loginStatus = document.getElementById('loginStatus');
+const sessionStatus = document.getElementById('sessionStatus');
 const ridesEl = document.getElementById('rides');
 const topStatus = document.getElementById('topStatus');
 
@@ -134,13 +144,16 @@ async function loadMe(){
       accEl.textContent = 'Qeydiyyat yoxdur. Aşağıdakı formu doldurun.';
       show(cardReg, true);
       show(cardLogin, false);
+      show(cardSession, false);
       show(driverArea, false);
       return null;
     }
     accEl.innerHTML = `Status: <b>${data.driver.status}</b><br>Balans: <b>${data.driver.balance} AZN</b> (blok həddi: ${data.blockAt})`;
     // registration exists -> require login (UI)
     show(cardReg, false);
-    show(cardLogin, true);
+    // If already logged in, keep login card hidden.
+    show(cardLogin, !hasToken());
+    show(cardSession, hasToken());
     document.getElementById('loginPhone').value = (data.driver.phone||'');
     return data.driver;
   }catch(e){
@@ -219,12 +232,16 @@ document.getElementById('btnLogin').onclick = async ()=>{
     const password = document.getElementById('loginPass').value;
     const data = await api('/api/driver/login', { method:'POST', body:{ phone, password }});
     try{ localStorage.setItem('pt_driver_token', data.token); }catch{}
-    show(document.getElementById('btnLogout'), true);
     setStatus(loginStatus,'Daxil oldunuz ✅');
+    // Close login panel and open driver area
+    show(cardLogin, false);
+    show(cardSession, true);
+    setStatus(sessionStatus,'Daxil oldunuz ✅');
     show(driverArea, true);
     await loadOpenRides();
   }catch(e){
     setStatus(loginStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+    show(cardSession, false);
     show(driverArea, false);
   }
 };
@@ -235,7 +252,8 @@ document.getElementById('btnLogout').onclick = async ()=>{
   }catch{}
   clearToken();
   show(driverArea,false);
-  show(document.getElementById('btnLogout'), false);
+  show(cardSession, false);
+  show(cardLogin, true);
   setStatus(loginStatus,'Çıxış edildi.');
 };
 
@@ -287,11 +305,15 @@ async function loadOpenRides(){
   const ok = await ensureSession();
   if (ok){
     show(driverArea,true);
-    show(document.getElementById('btnLogout'), true);
-    setStatus(loginStatus,'Sessiya aktiv ✅');
+    show(cardLogin,false);
+    show(cardSession,true);
+    setStatus(sessionStatus,'Sessiya aktiv ✅');
     await loadOpenRides();
   } else {
     show(driverArea,false);
+    show(cardSession,false);
+    // If driver exists but no session, show login
+    show(cardLogin,true);
   }
 })();
 </script>
