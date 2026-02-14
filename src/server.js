@@ -1090,18 +1090,95 @@ app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession
 
 // driver: list nearest open rides (requires last_lat/last_lon)
 app.get('/api/driver/nearby_rides', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+  // Query params:
+  // - radius_km: 1/3/5 ... (default 3)
+  // - only_offers: 1 => show only offers addressed to this driver (and not expired)
+  // - force: 1 => allow one-time search even if driver is offline
+  const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
+  const onlyOffers = String(req.query.only_offers || '') === '1';
+  const force = String(req.query.force || '') === '1';
+
   const hasCols = await driversHaveOnlineCols();
   if (hasCols) {
-    // If offline, keep response empty (UX)
     const dQ = await pool.query(`SELECT is_online, last_lat, last_lon, last_loc_at FROM drivers WHERE id=$1`, [req.driver.id]);
     const row = dQ.rows[0];
-    if (!row?.is_online) return res.json({ ok:true, rides: [], offline:true });
-    if (row.last_lat === null || row.last_lon === null) return res.json({ ok:true, rides: [], note:'no_location' });
+
+    const isOnline = !!row?.is_online;
+    if (!isOnline && !force) return res.json({ ok:true, rides: [], offline:true });
+
+    if (row?.last_lat === null || row?.last_lon === null) {
+      return res.json({ ok:true, rides: [], note:'no_location', offline: !isOnline });
+    }
 
     const driverLat = Number(row.last_lat);
     const driverLon = Number(row.last_lon);
 
-    const q = await pool.query(
+    let q;
+    if (onlyOffers) {
+      q = await pool.query(
+        `SELECT id, pickup_lat, pickup_lon, pickup_text, drop_text, drop_lat, drop_lon, distance_km, fare, commission, created_at, offer_expires_at
+         FROM rides
+         WHERE status='searching'
+           AND offered_driver_id = $1
+           AND offer_expires_at IS NOT NULL
+           AND offer_expires_at > NOW()
+         ORDER BY offer_expires_at ASC
+         LIMIT 200`,
+        [req.driver.id]
+      );
+    } else {
+      q = await pool.query(
+        `SELECT id, pickup_lat, pickup_lon, pickup_text, drop_text, drop_lat, drop_lon, distance_km, fare, commission, created_at
+         FROM rides
+         WHERE status='searching'
+           AND (offered_driver_id IS NULL OR offered_driver_id = $1)
+         ORDER BY id DESC
+         LIMIT 200`,
+        [req.driver.id]
+      );
+    }
+
+    const rides = (q.rows||[])
+      .map(r => {
+        const kmToPickup = haversineKm(driverLat, driverLon, Number(r.pickup_lat), Number(r.pickup_lon));
+        return { ...r, km_to_pickup: Math.round(kmToPickup*100)/100 };
+      })
+      .filter(r => (Number(r.km_to_pickup) <= radiusKm))
+      .sort((a,b) => a.km_to_pickup - b.km_to_pickup)
+      .slice(0, 15);
+
+    return res.json({
+      ok:true,
+      rides,
+      radius_km: radiusKm,
+      only_offers: onlyOffers,
+      offline: !isOnline,
+      driver_location: { lat: driverLat, lon: driverLon }
+    });
+  }
+
+  // If DB doesn't have online cols, still attempt based on last_lat/last_lon.
+  const dQ = await pool.query(`SELECT last_lat, last_lon FROM drivers WHERE id=$1`, [req.driver.id]);
+  const row = dQ.rows[0];
+  if (!row || row.last_lat === null || row.last_lon === null) return res.json({ ok:true, rides: [], note:'no_location' });
+  const driverLat = Number(row.last_lat);
+  const driverLon = Number(row.last_lon);
+
+  let q;
+  if (onlyOffers) {
+    q = await pool.query(
+      `SELECT id, pickup_lat, pickup_lon, pickup_text, drop_text, drop_lat, drop_lon, distance_km, fare, commission, created_at, offer_expires_at
+       FROM rides
+       WHERE status='searching'
+         AND offered_driver_id = $1
+         AND offer_expires_at IS NOT NULL
+         AND offer_expires_at > NOW()
+       ORDER BY offer_expires_at ASC
+       LIMIT 200`,
+      [req.driver.id]
+    );
+  } else {
+    q = await pool.query(
       `SELECT id, pickup_lat, pickup_lon, pickup_text, drop_text, drop_lat, drop_lon, distance_km, fare, commission, created_at
        FROM rides
        WHERE status='searching'
@@ -1110,40 +1187,18 @@ app.get('/api/driver/nearby_rides', requireTelegram('driver'), requireDriverSess
        LIMIT 200`,
       [req.driver.id]
     );
-
-    const rides = (q.rows||[])
-      .map(r => {
-        const kmToPickup = haversineKm(driverLat, driverLon, Number(r.pickup_lat), Number(r.pickup_lon));
-        return { ...r, km_to_pickup: Math.round(kmToPickup*100)/100 };
-      })
-      .sort((a,b) => a.km_to_pickup - b.km_to_pickup)
-      .slice(0, 15);
-
-    return res.json({ ok:true, rides, driver_location: { lat: driverLat, lon: driverLon } });
   }
-  // If DB doesn't have online cols, still attempt based on last_lat/last_lon.
-  const dQ = await pool.query(`SELECT last_lat, last_lon FROM drivers WHERE id=$1`, [req.driver.id]);
-  const row = dQ.rows[0];
-  if (!row || row.last_lat === null || row.last_lon === null) return res.json({ ok:true, rides: [], note:'no_location' });
-  const driverLat = Number(row.last_lat);
-  const driverLon = Number(row.last_lon);
-  const q = await pool.query(
-    `SELECT id, pickup_lat, pickup_lon, pickup_text, drop_text, drop_lat, drop_lon, distance_km, fare, commission, created_at
-     FROM rides
-     WHERE status='searching'
-       AND (offered_driver_id IS NULL OR offered_driver_id = $1)
-     ORDER BY id DESC
-     LIMIT 200`,
-    [req.driver.id]
-  );
+
   const rides = (q.rows||[])
     .map(r => {
       const kmToPickup = haversineKm(driverLat, driverLon, Number(r.pickup_lat), Number(r.pickup_lon));
       return { ...r, km_to_pickup: Math.round(kmToPickup*100)/100 };
     })
+    .filter(r => (Number(r.km_to_pickup) <= radiusKm))
     .sort((a,b) => a.km_to_pickup - b.km_to_pickup)
     .slice(0, 15);
-  return res.json({ ok:true, rides, driver_location: { lat: driverLat, lon: driverLon } });
+
+  return res.json({ ok:true, rides, radius_km: radiusKm, only_offers: onlyOffers, driver_location: { lat: driverLat, lon: driverLon } });
 });
 
 // driver: logout (revoke current token)

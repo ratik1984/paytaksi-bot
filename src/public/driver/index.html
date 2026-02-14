@@ -107,42 +107,27 @@
 
   <!-- 3) Driver panels (visible only after login) -->
   <div class="hide" id="driverArea">
-    <!-- Active ride -->
-    <div class="card hide" id="cardActive">
-      <b>Aktiv sifariş</b>
-      <div class="muted" id="activeInfo">—</div>
-      <div class="row" style="margin-top:10px">
-        <div class="two">
-          <button id="btnNavPickupWaze" type="button">🧭 Waze (Müştəriyə)</button>
-          <button id="btnNavPickupGmaps" type="button">🧭 Google (Müştəriyə)</button>
-        </div>
-        <div class="two">
-          <button id="btnArrived" type="button">📍 Çatdım</button>
-          <button id="btnNavDropWaze" type="button" class="hide">🧭 Waze (Ünvana)</button>
-        </div>
-        <div class="two">
-          <button id="btnNavDropGmaps" type="button" class="hide">🧭 Google (Ünvana)</button>
-          <button id="btnRoute" type="button" class="hide">🗺 Tam marşrut</button>
-        </div>
-        <div class="two">
-          <button id="btnCustomerChat" type="button">💬 Müştəri ilə əlaqə</button>
-          <button id="btnCustomerCall" type="button">📞 Zəng (Telegram)</button>
-        </div>
-        <div class="two">
-          <button id="btnStartRide" type="button">▶️ Gedişə başla</button>
-          <button id="btnCompleteRide" type="button">✅ Bitir</button>
-        </div>
+    <div class="card">
+      <b>📍 Yaxın sifarişlər</b>
+      <div class="muted">GPS açıq olanda sizə ən yaxın sifarişlər burada çıxacaq.</div>
+      <div class="row" style="margin-top:8px">
+        <select id="radiusSel">
+          <option value="1">Radius: 1 km</option>
+          <option value="3" selected>Radius: 3 km</option>
+          <option value="5">Radius: 5 km</option>
+        </select>
+        <label class="muted" style="display:flex;gap:8px;align-items:center">
+          <input type="checkbox" id="onlyOffersToggle" style="width:auto" />
+          Yalnız təklif mənə gəlibsə göstər
+        </label>
+        <button id="btnNearbyManual" type="button">🔍 Manual yaxın sifariş axtar</button>
       </div>
-
-      <div class="card" style="margin-top:10px">
-        <b>Yazışma</b>
-        <div id="chatBox" style="max-height:260px;overflow:auto;margin-top:8px"></div>
-        <div class="two" style="margin-top:8px">
-          <input id="chatMsg" placeholder="Mesaj yazın…" />
-          <button id="btnSendChat" type="button">Göndər</button>
-        </div>
-        <div class="muted" id="chatStatus">—</div>
+      <div class="two" style="margin-top:8px">
+        <button id="btnLocNow" type="button">📍 Yerimi yenilə</button>
+        <button id="btnLocHelp" type="button" class="danger">❓ GPS icazəsi</button>
       </div>
+      <div class="muted" id="locStatus" style="margin-top:6px">—</div>
+      <div id="nearbyRides" style="margin-top:8px"></div>
     </div>
 
     <div class="card">
@@ -171,11 +156,15 @@ const regStatus = document.getElementById('regStatus');
 const loginStatus = document.getElementById('loginStatus');
 const sessionStatus = document.getElementById('sessionStatus');
 const ridesEl = document.getElementById('rides');
-const cardActive = document.getElementById('cardActive');
-const activeInfo = document.getElementById('activeInfo');
-const chatBox = document.getElementById('chatBox');
-const chatStatus = document.getElementById('chatStatus');
 const topStatus = document.getElementById('topStatus');
+const locStatus = document.getElementById('locStatus');
+const nearbyEl = document.getElementById('nearbyRides');
+
+const radiusSel = document.getElementById('radiusSel');
+const onlyOffersToggle = document.getElementById('onlyOffersToggle');
+const btnNearbyManual = document.getElementById('btnNearbyManual');
+
+restoreFilters();
 
 const u = tgUser();
 who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
@@ -235,11 +224,113 @@ async function getGeo(){
   return await new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
       () => resolve(null),
       { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 }
     );
   });
+}
+
+function fmtKm(x){
+  const n = Number(x);
+  if (!isFinite(n)) return '—';
+  if (n < 1) return `${Math.round(n*1000)} m`;
+  return `${n.toFixed(2)} km`;
+}
+
+function getRadiusKm(){
+  const v = Number(radiusSel?.value || localStorage.getItem('pt_radius_km') || 3);
+  return isFinite(v) ? v : 3;
+}
+function getOnlyOffers(){
+  return !!onlyOffersToggle?.checked;
+}
+function persistFilters(){
+  try{ localStorage.setItem('pt_radius_km', String(radiusSel.value)); }catch(_){}
+  try{ localStorage.setItem('pt_only_offers', onlyOffersToggle.checked ? '1' : '0'); }catch(_){}
+}
+function restoreFilters(){
+  try{
+    const r = localStorage.getItem('pt_radius_km');
+    if (r && radiusSel) radiusSel.value = r;
+  }catch(_){}
+  try{
+    const o = localStorage.getItem('pt_only_offers');
+    if (onlyOffersToggle) onlyOffersToggle.checked = (o === '1');
+  }catch(_){}
+}
+
+async function sendLocationOnce(){
+  const geo = await getGeo();
+  if (!geo) {
+    setStatus(locStatus, 'GPS alınmadı. Telefonun Location/GPS icazəsini yoxlayın.', false);
+    return null;
+  }
+  try{
+    await api('/api/driver/location', { method:'POST', body: geo });
+    setStatus(locStatus, `Yer yeniləndi ✅ (dəqiqlik: ${Math.round(geo.accuracy||0)}m)`);
+    return geo;
+  }catch(e){
+    setStatus(locStatus, 'Yer göndərilə bilmədi: '+(e.data?.error||e.data?.reason||e.message), false);
+    return null;
+  }
+}
+
+async function loadNearby(opts={}){
+  try{
+    const qs = new URLSearchParams();
+    qs.set('radius_km', String(getRadiusKm()));
+    qs.set('only_offers', getOnlyOffers() ? '1' : '0');
+    if (opts.force) qs.set('force','1');
+    const data = await api('/api/driver/nearby_rides?'+qs.toString());
+    nearbyEl.innerHTML='';
+    if (data.offline){
+      nearbyEl.innerHTML = '<div class="muted">Siz offline-siniz. Manual axtar üçün “Manual yaxın sifariş axtar” basın (son yer məlumatı ilə). Daha stabil üçün Online edin və GPS göndərin.</div>';
+      return;
+    }
+    if (data.note === 'no_location'){
+      nearbyEl.innerHTML = '<div class="muted">Yerinizi göndərin: “Yerimi yenilə”.</div>';
+      return;
+    }
+
+    (data.rides||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = `<b>#${r.id}</b> • ${fmtKm(r.km_to_pickup)} yaxınlıqda<br>
+        ${r.pickup_text||''} → ${r.drop_text||''}<br>
+        Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+        <button data-id="${r.id}">✅ Qəbul et</button>`;
+      div.querySelector('button').onclick = async ()=>{
+        try{
+          await api('/api/driver/accept', { method:'POST', body:{ ride_id: r.id } });
+          alert('Qəbul edildi ✅');
+          await loadOpenRides();
+          await loadNearby();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      nearbyEl.appendChild(div);
+    });
+    if (!(data.rides||[]).length) nearbyEl.innerHTML = '<div class="muted">Yaxın sifariş tapılmadı.</div>';
+  }catch(e){
+    // ignore
+  }
+}
+
+function startLocationLoop(){
+  if (window.__locTimer) return;
+  window.__locTimer = setInterval(async ()=>{
+    try{
+      await sendLocationOnce();
+      await loadNearby();
+    }catch(_){ }
+  }, 10000);
+}
+
+function stopLocationLoop(){
+  if (window.__locTimer){
+    clearInterval(window.__locTimer);
+    window.__locTimer = null;
+  }
 }
 
 async function refreshAfterLogin(){
@@ -253,11 +344,21 @@ async function refreshAfterLogin(){
   }catch(_){
     setOnlineUI(false);
   }
-  await loadActiveRide();
+  // attempt location + nearby list if online
+  try{
+    const me2 = await api('/api/driver/session_me');
+    if (me2.driver?.is_online){
+      await sendLocationOnce();
+      await loadNearby();
+      startLocationLoop();
+    } else {
+      stopLocationLoop();
+    }
+  }catch(_){ }
   await loadOpenRides();
   // auto refresh offers/open rides
   if (!window.__ridesTimer){
-    window.__ridesTimer = setInterval(()=>{ try{ loadActiveRide(); loadOpenRides(); }catch(_){} }, 5000);
+    window.__ridesTimer = setInterval(()=>{ try{ loadOpenRides(); }catch(_){} }, 5000);
   }
 }
 
@@ -266,6 +367,9 @@ document.getElementById('btnGoOnline').onclick = async ()=>{
     const geo = await getGeo();
     await api('/api/driver/set_online', { method:'POST', body:{ online:true, ...(geo||{}) }});
     setOnlineUI(true);
+    await sendLocationOnce();
+    await loadNearby();
+    startLocationLoop();
     await loadOpenRides();
   }catch(e){
     setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
@@ -276,10 +380,25 @@ document.getElementById('btnGoOffline').onclick = async ()=>{
   try{
     await api('/api/driver/set_online', { method:'POST', body:{ online:false }});
     setOnlineUI(false);
+    stopLocationLoop();
   }catch(e){
     setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
   }
 };
+
+document.getElementById('btnLocNow').onclick = async ()=>{
+  await sendLocationOnce();
+  await loadNearby();
+};
+
+document.getElementById('btnLocHelp').onclick = async ()=>{
+  alert('GPS icazəsi üçün: Telefon Settings → Telegram → Location icazəsini "While using" edin. Sonra WebApp-də “Yerimi yenilə” basın.');
+};
+
+// filters
+if (radiusSel) radiusSel.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
+if (onlyOffersToggle) onlyOffersToggle.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
+if (btnNearbyManual) btnNearbyManual.onclick = async ()=>{ await loadNearby({force:true}); };
 
 document.getElementById('btnReg').onclick = async ()=>{
   try{
@@ -378,11 +497,6 @@ document.getElementById('btnTop').onclick = async ()=>{
 
 async function loadOpenRides(){
   try{
-    // If driver has active ride, hide open rides list (focus mode)
-    if (!cardActive.classList.contains('hide')) {
-      ridesEl.innerHTML = '<div class="muted">Aktiv sifariş var. Yeni sifarişləri görmək üçün əvvəlcə bunu bitirin.</div>';
-      return;
-    }
     const data = await api('/api/driver/open_rides');
     ridesEl.innerHTML='';
     if (data.offline){
@@ -409,9 +523,6 @@ async function loadOpenRides(){
         try{
           await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
           alert('Qəbul edildi ✅');
-          // accept -> focus on active ride and open pickup navigation
-          setRideStage(r.id, 'to_pickup');
-          await loadActiveRide();
           await loadOpenRides();
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
@@ -437,9 +548,6 @@ async function loadOpenRides(){
         try{
           await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
           alert('Qəbul edildi ✅');
-          // accept -> focus on active ride and open pickup navigation
-          setRideStage(r.id, 'to_pickup');
-          await loadActiveRide();
           await loadOpenRides();
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
@@ -453,161 +561,6 @@ async function loadOpenRides(){
     }
   }
 }
-
-function tgUserLink(tg_id, username){
-  if (username) return `https://t.me/${encodeURIComponent(username)}`;
-  // tg://user?id=... works inside Telegram
-  return `tg://user?id=${encodeURIComponent(String(tg_id||''))}`;
-}
-
-function openTgLink(url){
-  try{
-    if (Telegram?.WebApp?.openTelegramLink) Telegram.WebApp.openTelegramLink(url);
-    else window.open(url,'_blank');
-  }catch{ window.open(url,'_blank'); }
-}
-
-function openExternal(url){
-  try{
-    if (Telegram?.WebApp?.openLink) Telegram.WebApp.openLink(url);
-    else window.open(url,'_blank');
-  }catch{ window.open(url,'_blank'); }
-}
-
-function wazeUrl(lat, lon){
-  const ll = `${lat},${lon}`;
-  return `https://waze.com/ul?ll=${encodeURIComponent(ll)}&navigate=yes`;
-}
-
-function gmapsNavUrl(lat, lon){
-  const d = `${lat},${lon}`;
-  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(d)}`;
-}
-
-function getRideStage(rideId){
-  try{ return localStorage.getItem('pt_stage_'+rideId) || 'to_pickup'; }catch{ return 'to_pickup'; }
-}
-
-function setRideStage(rideId, stage){
-  try{ localStorage.setItem('pt_stage_'+rideId, stage); }catch{}
-}
-
-let __activeRideId = null;
-let __activeRide = null;
-
-async function loadActiveRide(){
-  try{
-    const data = await api('/api/driver/active_ride');
-    const r = data.ride;
-    __activeRide = r;
-    __activeRideId = r?.id || null;
-    show(cardActive, !!r);
-    if (!r) return;
-
-    const passName = (r.passenger_first_name || 'Müştəri') + (r.passenger_username ? ` (@${r.passenger_username})` : '');
-    activeInfo.innerHTML = `<b>#${r.id}</b> • <b>${r.status}</b><br>`+
-      `${r.pickup_text||''} → ${r.drop_text||''}<br>`+
-      `Məsafə: <b>${Number(r.distance_km).toFixed(2)} km</b> • Qiymət: <b>${Number(r.fare).toFixed(2)} AZN</b><br>`+
-      `Müştəri: <b>${passName}</b>`;
-
-    // Stage-based navigation: accept -> go to pickup, then "Çatdım" -> go to drop & enable start
-    const stage = getRideStage(r.id);
-    const isToPickup = (stage !== 'to_drop');
-
-    const btnDropW = document.getElementById('btnNavDropWaze');
-    const btnDropG = document.getElementById('btnNavDropGmaps');
-    const btnRoute = document.getElementById('btnRoute');
-    btnDropW.classList.toggle('hide', isToPickup);
-    btnDropG.classList.toggle('hide', isToPickup);
-    btnRoute.classList.toggle('hide', true); // optional (kept hidden)
-
-    document.getElementById('btnNavPickupWaze').onclick = ()=> openExternal(wazeUrl(r.pickup_lat, r.pickup_lon));
-    document.getElementById('btnNavPickupGmaps').onclick = ()=> openExternal(gmapsNavUrl(r.pickup_lat, r.pickup_lon));
-    btnDropW.onclick = ()=> openExternal(wazeUrl(r.drop_lat, r.drop_lon));
-    btnDropG.onclick = ()=> openExternal(gmapsNavUrl(r.drop_lat, r.drop_lon));
-
-    document.getElementById('btnArrived').onclick = ()=>{
-      setRideStage(r.id, 'to_drop');
-      btnDropW.classList.remove('hide');
-      btnDropG.classList.remove('hide');
-
-      // enable start ride
-      document.getElementById('btnStartRide').disabled = false;
-    };
-    document.getElementById('btnCustomerChat').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
-    document.getElementById('btnCustomerCall').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
-
-    // UX: "Gedişə başla" is enabled after "Çatdım".
-    const btnStart = document.getElementById('btnStartRide');
-    btnStart.disabled = isToPickup;
-    btnStart.onclick = async ()=>{
-      try{
-        await api('/api/driver/start',{method:'POST',body:{ride_id:r.id}});
-        await loadActiveRide();
-      }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
-    };
-    document.getElementById('btnCompleteRide').onclick = async ()=>{
-      if (!confirm('Sifarişi bitirmək?')) return;
-      try{
-        const j = await api('/api/driver/complete',{method:'POST',body:{ride_id:r.id}});
-        alert(`Bitdi ✅ Komissiya: ${j.commission} AZN. Yeni balans: ${j.new_balance} AZN`);
-        await loadActiveRide();
-        await loadOpenRides();
-      }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
-    };
-
-    await loadChat();
-  }catch(e){
-    // ignore
-  }
-}
-
-function renderChat(messages){
-  chatBox.innerHTML='';
-  (messages||[]).forEach((m)=>{
-    const div = document.createElement('div');
-    div.style.margin = '6px 0';
-    div.style.padding = '8px 10px';
-    div.style.borderRadius = '12px';
-    div.style.border = '1px solid #e6e6e6';
-    div.style.background = (m.sender_role === 'driver') ? '#f7f7f7' : '#fff';
-    div.innerHTML = `<b>${m.sender_role === 'driver' ? 'Siz' : 'Müştəri'}</b> <span class="muted">${new Date(m.created_at).toLocaleString()}</span><br>${escapeHtml(m.message)}`;
-    chatBox.appendChild(div);
-  });
-  chatBox.scrollTop = chatBox.scrollHeight;
-}
-
-function escapeHtml(str){
-  return String(str||'')
-    .replaceAll('&','&amp;')
-    .replaceAll('<','&lt;')
-    .replaceAll('>','&gt;');
-}
-
-async function loadChat(){
-  if (!__activeRideId) return;
-  try{
-    const j = await api(`/api/driver/ride_messages?ride_id=${encodeURIComponent(__activeRideId)}`);
-    renderChat(j.messages);
-    setStatus(chatStatus,'Yazışma hazır ✅');
-  }catch(e){
-    setStatus(chatStatus,'Chat xətası: '+(e.data?.error||e.message), false);
-  }
-}
-
-document.getElementById('btnSendChat').onclick = async ()=>{
-  if (!__activeRideId) return;
-  const inp = document.getElementById('chatMsg');
-  const msg = inp.value.trim();
-  if (!msg) return;
-  try{
-    inp.value='';
-    await api('/api/driver/send_message',{method:'POST',body:{ride_id:__activeRideId,message:msg}});
-    await loadChat();
-  }catch(e){
-    setStatus(chatStatus,'Göndərmə xətası: '+(e.data?.error||e.message), false);
-  }
-};
 
 (async ()=>{
   await loadMe();
