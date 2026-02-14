@@ -194,10 +194,38 @@ async function loadRides(){
       const div = document.createElement('div');
       div.className='item';
       const drv = r.driver_id ? `Sürücü: ${r.driver_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
+
+      // Only allow cancel while the ride is still waiting for a driver.
+      const canCancel = (r.status === 'searching' || r.status === 'assigned');
+      const cancelBtn = canCancel
+        ? `<div style="margin-top:10px;"><button class="btn secondary" data-cancel="${r.id}">Sifarişi ləğv et</button></div>`
+        : '';
+
       div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN<br>
-        <span class="muted">${drv}</span>`;
+        <span class="muted">${drv}</span>
+        ${cancelBtn}`;
+
+      const btn = div.querySelector('button[data-cancel]');
+      if (btn){
+        btn.addEventListener('click', async ()=>{
+          btn.disabled = true;
+          try{
+            const res = await api('/api/passenger/cancel_ride', { ride_id: Number(btn.dataset.cancel) });
+            if (res.ok){
+              toast('Sifariş ləğv edildi');
+              await loadRides();
+            } else {
+              toast(res.error || 'Ləğv etmək alınmadı');
+            }
+          }catch(e){
+            toast('Şəbəkə xətası');
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      }
       ridesEl.appendChild(div);
     });
     if (!data.rides?.length) ridesEl.innerHTML = '<div class="muted">Hələ sifariş yoxdur.</div>';
