@@ -181,7 +181,9 @@ async function loadActiveRide(){
     const isCancelled = status === 'cancelled';
     const reason = r.cancelled_reason ? `<div class="muted"><b>Səbəb:</b> ${r.cancelled_reason}</div>` : '';
 
-    const canChat = (status==='assigned' || status==='started');
+    const canViewChat = ['assigned','started','completed','cancelled'].includes(status);
+    const canSendChat = (status==='assigned' || status==='started');
+    const canCall = (status==='assigned' || status==='started');
     const passengerName = r.passenger_first_name || '';
     const passengerUsername = r.passenger_username || '';
     const passengerTgId = r.passenger_tg_id;
@@ -193,18 +195,20 @@ async function loadActiveRide(){
         Məsafə: ${Number(r.distance_km||0).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN
         ${reason}
         ${passengerTgId ? `<div class="muted" style="margin-top:6px">Sərnişin: <b>${passengerName}</b> (@${passengerUsername||'-'})</div>` : ''}
-        ${(canChat && passengerTgId) ? `
+        ${(canViewChat && passengerTgId) ? `
           <div class="actions" style="margin-top:10px">
-            <button id="btnChat">💬 Yazışma</button>
-            <button id="btnCall">📞 Sərnişinə zəng</button>
+            <button id="btnChat">${canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)'}</button>
+            ${canCall ? `<button id="btnCall">📞 Sərnişinə zəng</button>` : ''}
           </div>
           <div id="chatBox" class="card" style="display:none;margin-top:8px;border-radius:12px;padding:10px">
-            <div class="muted" style="margin-bottom:6px">Yazışma yalnız aktiv sifarişdə mümkündür.</div>
+            <div class="muted" style="margin-bottom:6px">${canSendChat ? 'Yazışma yalnız aktiv sifarişdə mümkündür.' : 'Bu yazışma arxivdir (yalnız oxu).'}</div>
             <div id="msgList" style="max-height:220px;overflow:auto;border:1px dashed #ddd;border-radius:12px;padding:8px"></div>
-            <div class="row" style="margin-top:8px">
-              <input id="msgText" placeholder="Mesaj yaz…" />
-              <button id="btnSend">Göndər</button>
-            </div>
+            ${canSendChat ? `
+              <div class="row" style="margin-top:8px">
+                <input id="msgText" placeholder="Mesaj yaz…" />
+                <button id="btnSend">Göndər</button>
+              </div>
+            ` : ''}
           </div>
         ` : ''}
         <div class="actions" style="margin-top:10px">
@@ -264,7 +268,7 @@ async function loadActiveRide(){
       const open = chatBox.style.display !== 'none';
       if (open){
         chatBox.style.display='none';
-        bChat.textContent='💬 Yazışma';
+        bChat.textContent = canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)';
         if (chatTimer){ clearInterval(chatTimer); chatTimer=null; }
         return;
       }

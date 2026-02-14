@@ -1069,6 +1069,70 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
   res.json({ ok: true, rides: q.rows });
 });
 
+// ---- Admin: Ride chat archive
+// List rides that have chat messages (for moderation/support).
+app.get('/api/admin/ride_chats', adminAuth, async (req, res) => {
+  const days = String(req.query.days || '30');
+  const sinceSql = days === 'all' ? null : `NOW() - INTERVAL '${Number(days) || 30} days'`;
+
+  try {
+    const q = await pool.query(
+      `SELECT r.id, r.status, r.created_at, r.updated_at, r.pickup_text, r.drop_text,
+              pu.first_name AS passenger_name, pu.username AS passenger_username, pu.tg_id AS passenger_tg_id,
+              du.first_name AS driver_name, du.username AS driver_username, du.tg_id AS driver_tg_id,
+              COUNT(m.id)::int AS msg_count,
+              MAX(m.created_at) AS last_msg_at
+       FROM ride_messages m
+       JOIN rides r ON r.id = m.ride_id
+       JOIN users pu ON pu.id = r.passenger_user_id
+       LEFT JOIN drivers d ON d.id = r.driver_id
+       LEFT JOIN users du ON du.id = d.user_id
+       ${sinceSql ? `WHERE m.created_at >= ${sinceSql}` : ''}
+       GROUP BY r.id, pu.id, du.id
+       ORDER BY last_msg_at DESC
+       LIMIT 200`
+    );
+    res.json({ ok: true, days, rides: q.rows });
+  } catch (e) {
+    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
+    throw e;
+  }
+});
+
+// Fetch messages for a ride (read-only).
+app.get('/api/admin/ride_chat', adminAuth, async (req, res) => {
+  const ride_id = Number(req.query.ride_id);
+  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
+
+  const rQ = await pool.query(
+    `SELECT r.*, pu.first_name AS passenger_name, pu.username AS passenger_username, pu.tg_id AS passenger_tg_id,
+            du.first_name AS driver_name, du.username AS driver_username, du.tg_id AS driver_tg_id
+     FROM rides r
+     JOIN users pu ON pu.id = r.passenger_user_id
+     LEFT JOIN drivers d ON d.id = r.driver_id
+     LEFT JOIN users du ON du.id = d.user_id
+     WHERE r.id=$1`,
+    [ride_id]
+  );
+  const ride = rQ.rows[0];
+  if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+
+  try {
+    const mQ = await pool.query(
+      `SELECT id, ride_id, sender_role, sender_user_id, message, created_at
+       FROM ride_messages
+       WHERE ride_id=$1
+       ORDER BY id ASC
+       LIMIT 500`,
+      [ride_id]
+    );
+    res.json({ ok: true, ride, messages: mQ.rows });
+  } catch (e) {
+    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
+    throw e;
+  }
+});
+
 // ---- Start server
 const PORT = process.env.PORT || 10000;
 

@@ -229,23 +229,27 @@ async function loadRides(){
       div.className='item';
       const drv = r.driver_id ? `Sürücü: ${r.driver_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
       const canCancel = (r.status === 'searching' || r.status === 'assigned');
-      const canChat = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
+      const canViewChat = (r.driver_id && ['assigned','started','completed','cancelled'].includes(String(r.status)));
+      const canSendChat = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
+      const canCall = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
       div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN<br>
         <span class="muted">${drv}</span>
-        ${canChat ? `
+        ${canViewChat ? `
           <div class="actions" style="margin-top:8px">
-            <button class="btnSmall" data-chat="${r.id}">💬 Yazışma</button>
-            <button class="btnSmall" data-call="${r.id}">📞 Sürücüyə zəng</button>
+            <button class="btnSmall" data-chat="${r.id}">${canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)'}</button>
+            ${canCall ? `<button class="btnSmall" data-call="${r.id}">📞 Sürücüyə zəng</button>` : ''}
           </div>
           <div class="card" data-chatbox="${r.id}" style="display:none;margin-top:8px;border-radius:12px;padding:10px">
-            <div class="muted" style="margin-bottom:6px">Yazışma yalnız sürücü qəbul edəndən sonra aktiv olur.</div>
+            <div class="muted" style="margin-bottom:6px">${canSendChat ? 'Yazışma yalnız sürücü qəbul edəndən sonra aktiv olur.' : 'Bu yazışma arxivdir (yalnız oxu).'}</div>
             <div data-msglist style="max-height:220px;overflow:auto;border:1px dashed #ddd;border-radius:12px;padding:8px"></div>
-            <div class="row" style="margin-top:8px">
-              <input data-msgtext placeholder="Mesaj yaz…" />
-              <button class="btnSmall" data-send>Göndər</button>
-            </div>
+            ${canSendChat ? `
+              <div class="row" style="margin-top:8px">
+                <input data-msgtext placeholder="Mesaj yaz…" />
+                <button class="btnSmall" data-send>Göndər</button>
+              </div>
+            ` : ''}
           </div>
         ` : ''}
         ${canCancel ? `<div class="actions"><button class="btnSmall" data-cancel="${r.id}">❌ Ləğv et</button><span class="muted">(Sifarişin ləğv edilməsi sürücüyə bildiriləcək)</span></div>` : ''}`;
@@ -267,12 +271,14 @@ async function loadRides(){
         };
       }
 
-      if (canChat){
-        // Call (Telegram)
+      if (canViewChat){
+        // Call (Telegram) - only while active
         const bCall = div.querySelector('[data-call]');
-        bCall.onclick = ()=>{
-          openTelegramUser({ tg_id: r.driver_tg_id, username: r.driver_username });
-        };
+        if (bCall) {
+          bCall.onclick = ()=>{
+            openTelegramUser({ tg_id: r.driver_tg_id, username: r.driver_username });
+          };
+        }
 
         // Chat toggle
         const bChat = div.querySelector('[data-chat]');
@@ -313,7 +319,7 @@ async function loadRides(){
           const open = box.style.display !== 'none';
           if (open){
             box.style.display = 'none';
-            bChat.textContent = '💬 Yazışma';
+            bChat.textContent = canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)';
             if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
             return;
           }
@@ -323,18 +329,20 @@ async function loadRides(){
           chatTimer = setInterval(refreshChat, 3000);
         };
 
-        bSend.onclick = async ()=>{
-          const text = String(input.value||'').trim();
-          if (!text) return;
-          bSend.disabled = true;
-          try{
-            await api('/api/passenger/send_message',{method:'POST',body:{ride_id:Number(r.id), text}});
-            input.value='';
-            await refreshChat();
-          }catch(e){
-            alert('Xəta: '+(e.data?.error||e.data?.reason||e.message));
-          }finally{ bSend.disabled = false; }
-        };
+        if (bSend){
+          bSend.onclick = async ()=>{
+            const text = String(input.value||'').trim();
+            if (!text) return;
+            bSend.disabled = true;
+            try{
+              await api('/api/passenger/send_message',{method:'POST',body:{ride_id:Number(r.id), text}});
+              input.value='';
+              await refreshChat();
+            }catch(e){
+              alert('Xəta: '+(e.data?.error||e.data?.reason||e.message));
+            }finally{ bSend.disabled = false; }
+          };
+        }
       }
     });
     if (!data.rides?.length) ridesEl.innerHTML = '<div class="muted">Hələ sifariş yoxdur.</div>';
