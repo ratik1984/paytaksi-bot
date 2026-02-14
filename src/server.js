@@ -10,6 +10,7 @@ import { pool } from './db.js';
 import { validateTelegramWebAppData } from './telegramAuth.js';
 import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -132,31 +133,6 @@ const passengerBot = TOKENS.passenger ? new Telegraf(TOKENS.passenger) : null;
 const driverBot = TOKENS.driver ? new Telegraf(TOKENS.driver) : null;
 const adminBot = TOKENS.admin ? new Telegraf(TOKENS.admin) : null;
 
-// Simple telegram notifier (best-effort)
-async function sendTelegram(role, chatId, text, extra = {}) {
-  try {
-    const bot = role === 'passenger' ? passengerBot : role === 'driver' ? driverBot : adminBot;
-    if (!bot) return { ok: false, error: 'bot_not_configured' };
-    if (!chatId) return { ok: false, error: 'chat_id_required' };
-    await bot.telegram.sendMessage(Number(chatId), String(text), extra);
-    return { ok: true };
-  } catch (e) {
-    console.error('sendTelegram failed:', role, e?.message || e);
-    return { ok: false, error: 'send_failed' };
-  }
-}
-
-// Convenience wrapper: send message with an optional WebApp button
-async function sendTelegramToRole(role, chatId, text, webAppUrl = null, opts = {}) {
-  const extra = { ...opts };
-  if (webAppUrl) {
-    extra.reply_markup = {
-      inline_keyboard: [[{ text: 'Aç', web_app: { url: String(webAppUrl) } }]]
-    };
-  }
-  return sendTelegram(role, chatId, text, extra);
-}
-
 function webAppButton(text, url) {
   return Markup.keyboard([[Markup.button.webApp(text, url)]])
     .resize()
@@ -243,6 +219,52 @@ function requireTelegram(role) {
     if (!req.tgUser?.id) return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_user' });
     next();
   };
+}
+
+// ---- Driver auth (registration -> login -> driver area)
+// DB tables required: driver_credentials, driver_sessions (see SQL patch)
+const DRIVER_SESSION_DAYS = Number(process.env.DRIVER_SESSION_DAYS || 30);
+
+function getDriverToken(req){
+  return String(req.headers['x-driver-token'] || '').trim();
+}
+
+async function requireDriverSession(req, res, next){
+  try{
+    const token = getDriverToken(req);
+    if (!token) return res.status(401).json({ ok:false, error:'need_login' });
+
+    const user = await upsertUser(req.tgUser, 'driver');
+    const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
+    const driver = dQ.rows[0];
+    if (!driver) return res.status(400).json({ ok:false, error:'not_registered' });
+
+    const sQ = await pool.query(
+      `SELECT * FROM driver_sessions 
+       WHERE token=$1 AND driver_id=$2 AND revoked_at IS NULL AND expires_at > NOW()
+       LIMIT 1`,
+      [token, driver.id]
+    );
+    if (!sQ.rows[0]) return res.status(401).json({ ok:false, error:'need_login' });
+
+    req.driver = driver;
+    req.driverSession = sQ.rows[0];
+    return next();
+  }catch(e){
+    console.error('requireDriverSession', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+}
+
+async function createDriverSession(driver_id){
+  const token = crypto.randomBytes(24).toString('hex');
+  const q = await pool.query(
+    `INSERT INTO driver_sessions (driver_id, token, expires_at)
+     VALUES ($1,$2, NOW() + ($3 || ' days')::interval)
+     RETURNING token, expires_at`,
+    [driver_id, token, String(DRIVER_SESSION_DAYS)]
+  );
+  return q.rows[0];
 }
 
 async function upsertUser(tgUser, role) {
@@ -502,94 +524,26 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
   try {
-    const ride_id = Number(req.body?.ride_id);
-    const reason = String(req.body?.reason || '').trim().slice(0, 200) || null;
+    const passenger_tg_id = String(req.tgUser.id);
+    const ride_id = Number(req.body.ride_id);
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const passenger = await upsertUser(req.tgUser, 'passenger');
+    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
+    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
 
-    // Lock ONLY the rides row (Postgres doesn't allow FOR UPDATE on the nullable side of LEFT JOIN)
-    const client = await pool.connect();
-    let ride;
-    try {
-      await client.query('BEGIN');
-
-      const rideQ = await client.query(
-        `SELECT *
-         FROM rides
-         WHERE id=$1 AND passenger_user_id=$2
-         FOR UPDATE`,
-        [ride_id, passenger.id]
-      );
-      ride = rideQ.rows[0];
-
-      if (!ride) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ ok: false, error: 'ride_not_found' });
-      }
-
-      if (!['searching', 'assigned'].includes(ride.status)) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
-      }
-
-      // Backward compatible update: if cancel columns are not present, fall back to status only.
-      // NOTE: In Postgres, any error inside a transaction aborts it; use SAVEPOINT to recover.
-      await client.query('SAVEPOINT cancel_cols');
-      try {
-        const upd = await client.query(
-          `UPDATE rides
-           SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
-           WHERE id=$1
-           RETURNING *`,
-          [ride_id, reason]
-        );
-        ride = { ...ride, ...upd.rows[0] };
-      } catch (e2) {
-        // 42703 = undefined_column
-        if (e2 && e2.code === '42703') {
-          await client.query('ROLLBACK TO SAVEPOINT cancel_cols');
-          const upd = await client.query(
-            `UPDATE rides
-             SET status='cancelled', updated_at=NOW()
-             WHERE id=$1
-             RETURNING *`,
-            [ride_id]
-          );
-          ride = { ...ride, ...upd.rows[0] };
-        } else {
-          throw e2;
-        }
-      }
-
-      await client.query('COMMIT');
-    } catch (e) {
-      try { await client.query('ROLLBACK'); } catch {}
-      throw e;
-    } finally {
-      client.release();
+    if (!['searching','assigned'].includes(ride.status)) {
+      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
     }
 
-    // Notify driver if already assigned (best-effort)
-    if (ride.driver_id) {
-      const dQ = await pool.query(
-        `SELECT u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
-         FROM drivers d
-         JOIN users u ON u.id = d.user_id
-         WHERE d.id=$1`,
-        [ride.driver_id]
-      );
-      const d = dQ.rows?.[0];
-      if (d?.driver_tg_id) {
-        const msg = `❌ Sifariş ləğv edildi (#${ride_id}).\n\n📍 ${ride.pickup_text || ''}\n➡️ ${ride.drop_text || ''}${reason ? `\n\nSəbəb: ${reason}` : ''}`;
-        // Explicitly keep notifications enabled (sound if user hasn't muted the chat)
-        await sendTelegram('driver', d.driver_tg_id, msg, { disable_notification: false });
-      }
+    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+
+    if (ride.driver_tg_id) {
+      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
     }
 
     return res.json({ ok: true });
   } catch (e) {
-    console.error('cancel_ride error:', e);
+    console.error(e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
@@ -606,9 +560,7 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
      LIMIT 10`,
     [passenger.id]
   );
-  // Backward-compatible alias used by the passenger UI
-  const rides = (q.rows || []).map((r) => ({ ...r, driver_name: r.driver_first_name || null }));
-  res.json({ ok: true, rides });
+  res.json({ ok: true, rides: q.rows });
 });
 
 // ---- Driver: register + upload docs
@@ -672,8 +624,82 @@ app.get('/api/driver/me', requireTelegram('driver'), async (req, res) => {
   res.json({ ok: true, driver: q.rows[0] || null, blockAt: DRIVER_BLOCK_AT });
 });
 
+
+// driver: set password (after registration)
+app.post('/api/driver/set_password', requireTelegram('driver'), async (req, res) => {
+  try{
+    const { password } = req.body || {};
+    if (!password || String(password).length < 4) return res.status(400).json({ ok:false, error:'pass_too_short' });
+
+    const user = await upsertUser(req.tgUser, 'driver');
+    const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
+    const driver = dQ.rows[0];
+    if (!driver) return res.status(400).json({ ok:false, error:'not_registered' });
+
+    const hash = await bcrypt.hash(String(password), 10);
+    await pool.query(
+      `INSERT INTO driver_credentials (driver_id, password_hash)
+       VALUES ($1,$2)
+       ON CONFLICT (driver_id) DO UPDATE SET password_hash=EXCLUDED.password_hash, updated_at=NOW()`,
+      [driver.id, hash]
+    );
+    return res.json({ ok:true });
+  }catch(e){
+    console.error(e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// driver: login -> returns session token
+app.post('/api/driver/login', requireTelegram('driver'), async (req, res) => {
+  try{
+    const { phone, password } = req.body || {};
+    if (!password) return res.status(400).json({ ok:false, error:'missing_password' });
+
+    const user = await upsertUser(req.tgUser, 'driver');
+    const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
+    const driver = dQ.rows[0];
+    if (!driver) return res.status(400).json({ ok:false, error:'not_registered' });
+
+    if (phone && driver.phone && String(phone).trim() !== String(driver.phone).trim()){
+      return res.status(403).json({ ok:false, error:'phone_mismatch' });
+    }
+
+    const cQ = await pool.query(`SELECT * FROM driver_credentials WHERE driver_id=$1`, [driver.id]);
+    const cred = cQ.rows[0];
+    if (!cred) return res.status(403).json({ ok:false, error:'no_password_set' });
+
+    const ok = await bcrypt.compare(String(password), String(cred.password_hash));
+    if (!ok) return res.status(403).json({ ok:false, error:'bad_password' });
+
+    const sess = await createDriverSession(driver.id);
+    await pool.query(`UPDATE drivers SET last_login_at=NOW() WHERE id=$1`, [driver.id]).catch(()=>{});
+    return res.json({ ok:true, token: sess.token, expires_at: sess.expires_at, status: driver.status });
+  }catch(e){
+    console.error(e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// driver: session me (validate token)
+app.get('/api/driver/session_me', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+  return res.json({ ok:true, driver: req.driver, session: { expires_at: req.driverSession.expires_at }});
+});
+
+// driver: logout (revoke current token)
+app.post('/api/driver/logout', requireTelegram('driver'), async (req, res) => {
+  try{
+    const token = getDriverToken(req);
+    if (token) await pool.query(`UPDATE driver_sessions SET revoked_at=NOW() WHERE token=$1`, [token]);
+    return res.json({ ok:true });
+  }catch(e){
+    console.error(e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 // driver: list searching rides (simple)
-app.get('/api/driver/open_rides', requireTelegram('driver'), async (req, res) => {
+app.get('/api/driver/open_rides', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
   const driver = dQ.rows[0];
@@ -685,31 +711,8 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), async (req, res) =>
   res.json({ ok: true, rides: q.rows });
 });
 
-// driver: active (assigned/started/cancelled) ride for quick status view in the webapp
-app.get('/api/driver/active_ride', requireTelegram('driver'), async (req, res) => {
-  const user = await upsertUser(req.tgUser, 'driver');
-  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
-  const driver = dQ.rows[0];
-  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
-
-  // Show latest relevant ride (even if cancelled) so driver can see the cancellation message in-app
-  const rQ = await pool.query(
-    `SELECT r.*,
-            pu.tg_id as passenger_tg_id,
-            pu.first_name as passenger_first_name,
-            pu.username as passenger_username
-     FROM rides r
-     JOIN users pu ON pu.id = r.passenger_user_id
-     WHERE r.driver_id=$1 AND r.status IN ('assigned','started','cancelled')
-     ORDER BY r.id DESC
-     LIMIT 1`,
-    [driver.id]
-  );
-  res.json({ ok: true, ride: rQ.rows[0] || null });
-});
-
 // driver: accept ride
-app.post('/api/driver/accept', requireTelegram('driver'), async (req, res) => {
+app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -724,185 +727,12 @@ app.post('/api/driver/accept', requireTelegram('driver'), async (req, res) => {
      RETURNING *`,
     [driver.id, ride_id]
   );
-  const ride = rideQ.rows[0];
-  if (!ride) return res.status(409).json({ ok: false, error: 'ride_not_available' });
-
-  // Notify passenger that a driver accepted and chat/contact is now available.
-  try {
-    const pQ = await pool.query(
-      `SELECT u.tg_id, u.username, u.first_name
-       FROM users u
-       WHERE u.id = $1`,
-      [ride.passenger_user_id]
-    );
-    const p = pQ.rows[0];
-    if (p?.tg_id) {
-      const pt = signPtToken(p.tg_id, 'passenger');
-      const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
-      const msg = `✅ Sifariş #${ride.id} sürücü tərəfindən qəbul edildi.\nİndi sürücü ilə yazışma və əlaqə aktivdir.`;
-      await sendTelegramToRole('passenger', p.tg_id, msg, url);
-    }
-  } catch (e) {
-    // Non-fatal
-  }
-
-  res.json({ ok: true, ride });
-});
-
-// ---- Ride chat/messages (Passenger)
-app.get('/api/passenger/ride_messages', requireTelegram('passenger'), async (req, res) => {
-  const passenger = await upsertUser(req.tgUser, 'passenger');
-  const ride_id = Number(req.query.ride_id);
-  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-  const rQ = await pool.query(`SELECT * FROM rides WHERE id=$1 AND passenger_user_id=$2`, [ride_id, passenger.id]);
-  if (!rQ.rows[0]) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-
-  try {
-    const mQ = await pool.query(
-      `SELECT id, ride_id, sender_role, sender_user_id, message, created_at
-       FROM ride_messages
-       WHERE ride_id=$1
-       ORDER BY id ASC
-       LIMIT 200`,
-      [ride_id]
-    );
-    res.json({ ok: true, messages: mQ.rows });
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
-});
-
-app.post('/api/passenger/send_message', requireTelegram('passenger'), async (req, res) => {
-  const passenger = await upsertUser(req.tgUser, 'passenger');
-  const ride_id = Number(req.body?.ride_id);
-  const text = String(req.body?.text || '').trim();
-  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-  if (!text) return res.status(400).json({ ok: false, error: 'text_required' });
-  if (text.length > 500) return res.status(400).json({ ok: false, error: 'text_too_long' });
-
-  const rQ = await pool.query(
-    `SELECT r.*, d.user_id as driver_user_id, du.tg_id as driver_tg_id
-     FROM rides r
-     LEFT JOIN drivers d ON d.id = r.driver_id
-     LEFT JOIN users du ON du.id = d.user_id
-     WHERE r.id=$1 AND r.passenger_user_id=$2`,
-    [ride_id, passenger.id]
-  );
-  const ride = rQ.rows[0];
-  if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-  if (!['assigned','started'].includes(String(ride.status))) {
-    return res.status(400).json({ ok: false, error: 'chat_not_available', status: ride.status });
-  }
-
-  let ins;
-  try {
-    ins = await pool.query(
-      `INSERT INTO ride_messages (ride_id, sender_role, sender_user_id, message)
-       VALUES ($1,'passenger',$2,$3)
-       RETURNING id, ride_id, sender_role, sender_user_id, message, created_at`,
-      [ride_id, passenger.id, text]
-    );
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
-
-  // Notify driver via Telegram (optional)
-  try {
-    if (ride.driver_tg_id) {
-      const pt = signPtToken(ride.driver_tg_id, 'driver');
-      const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
-      const snippet = text.length > 120 ? text.slice(0, 120) + '…' : text;
-      await sendTelegramToRole('driver', ride.driver_tg_id, `💬 Yeni mesaj (Sifariş #${ride_id}):\n${snippet}`, url);
-    }
-  } catch (e) {}
-
-  res.json({ ok: true, message: ins.rows[0] });
-});
-
-// ---- Ride chat/messages (Driver)
-app.get('/api/driver/ride_messages', requireTelegram('driver'), async (req, res) => {
-  const user = await upsertUser(req.tgUser, 'driver');
-  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
-  const driver = dQ.rows[0];
-  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
-  const ride_id = Number(req.query.ride_id);
-  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-  const rQ = await pool.query(`SELECT * FROM rides WHERE id=$1 AND driver_id=$2`, [ride_id, driver.id]);
-  if (!rQ.rows[0]) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-
-  try {
-    const mQ = await pool.query(
-      `SELECT id, ride_id, sender_role, sender_user_id, message, created_at
-       FROM ride_messages
-       WHERE ride_id=$1
-       ORDER BY id ASC
-       LIMIT 200`,
-      [ride_id]
-    );
-    res.json({ ok: true, messages: mQ.rows });
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
-});
-
-app.post('/api/driver/send_message', requireTelegram('driver'), async (req, res) => {
-  const user = await upsertUser(req.tgUser, 'driver');
-  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
-  const driver = dQ.rows[0];
-  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
-
-  const ride_id = Number(req.body?.ride_id);
-  const text = String(req.body?.text || '').trim();
-  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-  if (!text) return res.status(400).json({ ok: false, error: 'text_required' });
-  if (text.length > 500) return res.status(400).json({ ok: false, error: 'text_too_long' });
-
-  const rQ = await pool.query(
-    `SELECT r.*, pu.tg_id as passenger_tg_id
-     FROM rides r
-     JOIN users pu ON pu.id = r.passenger_user_id
-     WHERE r.id=$1 AND r.driver_id=$2`,
-    [ride_id, driver.id]
-  );
-  const ride = rQ.rows[0];
-  if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-  if (!['assigned','started'].includes(String(ride.status))) {
-    return res.status(400).json({ ok: false, error: 'chat_not_available', status: ride.status });
-  }
-
-  let ins;
-  try {
-    ins = await pool.query(
-      `INSERT INTO ride_messages (ride_id, sender_role, sender_user_id, message)
-       VALUES ($1,'driver',$2,$3)
-       RETURNING id, ride_id, sender_role, sender_user_id, message, created_at`,
-      [ride_id, user.id, text]
-    );
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
-
-  // Notify passenger via Telegram (optional)
-  try {
-    if (ride.passenger_tg_id) {
-      const pt = signPtToken(ride.passenger_tg_id, 'passenger');
-      const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
-      const snippet = text.length > 120 ? text.slice(0, 120) + '…' : text;
-      await sendTelegramToRole('passenger', ride.passenger_tg_id, `💬 Sürücüdən mesaj (Sifariş #${ride_id}):\n${snippet}`, url);
-    }
-  } catch (e) {}
-
-  res.json({ ok: true, message: ins.rows[0] });
+  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
+  res.json({ ok: true, ride: rideQ.rows[0] });
 });
 
 // driver: start
-app.post('/api/driver/start', requireTelegram('driver'), async (req, res) => {
+app.post('/api/driver/start', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -918,7 +748,7 @@ app.post('/api/driver/start', requireTelegram('driver'), async (req, res) => {
 });
 
 // driver: complete (apply 10% commission to driver balance)
-app.post('/api/driver/complete', requireTelegram('driver'), async (req, res) => {
+app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -946,7 +776,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), async (req, res) => 
 });
 
 // driver: topup request (manual approval)
-app.post('/api/driver/topup_request', requireTelegram('driver'), async (req, res) => {
+app.post('/api/driver/topup_request', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const { amount, method, reference } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -1067,70 +897,6 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
      ORDER BY r.id DESC LIMIT 200`
   );
   res.json({ ok: true, rides: q.rows });
-});
-
-// ---- Admin: Ride chat archive
-// List rides that have chat messages (for moderation/support).
-app.get('/api/admin/ride_chats', adminAuth, async (req, res) => {
-  const days = String(req.query.days || '30');
-  const sinceSql = days === 'all' ? null : `NOW() - INTERVAL '${Number(days) || 30} days'`;
-
-  try {
-    const q = await pool.query(
-      `SELECT r.id, r.status, r.created_at, r.updated_at, r.pickup_text, r.drop_text,
-              pu.first_name AS passenger_name, pu.username AS passenger_username, pu.tg_id AS passenger_tg_id,
-              du.first_name AS driver_name, du.username AS driver_username, du.tg_id AS driver_tg_id,
-              COUNT(m.id)::int AS msg_count,
-              MAX(m.created_at) AS last_msg_at
-       FROM ride_messages m
-       JOIN rides r ON r.id = m.ride_id
-       JOIN users pu ON pu.id = r.passenger_user_id
-       LEFT JOIN drivers d ON d.id = r.driver_id
-       LEFT JOIN users du ON du.id = d.user_id
-       ${sinceSql ? `WHERE m.created_at >= ${sinceSql}` : ''}
-       GROUP BY r.id, pu.id, du.id
-       ORDER BY last_msg_at DESC
-       LIMIT 200`
-    );
-    res.json({ ok: true, days, rides: q.rows });
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
-});
-
-// Fetch messages for a ride (read-only).
-app.get('/api/admin/ride_chat', adminAuth, async (req, res) => {
-  const ride_id = Number(req.query.ride_id);
-  if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-  const rQ = await pool.query(
-    `SELECT r.*, pu.first_name AS passenger_name, pu.username AS passenger_username, pu.tg_id AS passenger_tg_id,
-            du.first_name AS driver_name, du.username AS driver_username, du.tg_id AS driver_tg_id
-     FROM rides r
-     JOIN users pu ON pu.id = r.passenger_user_id
-     LEFT JOIN drivers d ON d.id = r.driver_id
-     LEFT JOIN users du ON du.id = d.user_id
-     WHERE r.id=$1`,
-    [ride_id]
-  );
-  const ride = rQ.rows[0];
-  if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-
-  try {
-    const mQ = await pool.query(
-      `SELECT id, ride_id, sender_role, sender_user_id, message, created_at
-       FROM ride_messages
-       WHERE ride_id=$1
-       ORDER BY id ASC
-       LIMIT 500`,
-      [ride_id]
-    );
-    res.json({ ok: true, ride, messages: mQ.rows });
-  } catch (e) {
-    if (e?.code === '42P01') return res.status(400).json({ ok: false, error: 'chat_table_missing', hint: 'run_sql_patch_ride_messages' });
-    throw e;
-  }
 });
 
 // ---- Start server
