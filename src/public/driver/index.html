@@ -189,6 +189,17 @@ function setOnlineUI(isOnline){
   onlineStatus.textContent = `Status: ${isOnline ? 'online' : 'offline'}`;
 }
 
+async function getGeo(){
+  return await new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 }
+    );
+  });
+}
+
 async function refreshAfterLogin(){
   show(cardLogin, false);
   show(cardSession, true);
@@ -205,7 +216,8 @@ async function refreshAfterLogin(){
 
 document.getElementById('btnGoOnline').onclick = async ()=>{
   try{
-    await api('/api/driver/set_online', { method:'POST', body:{ online:true }});
+    const geo = await getGeo();
+    await api('/api/driver/set_online', { method:'POST', body:{ online:true, ...(geo||{}) }});
     setOnlineUI(true);
     await loadOpenRides();
   }catch(e){

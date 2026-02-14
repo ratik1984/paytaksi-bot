@@ -139,6 +139,21 @@ function webAppButton(text, url) {
     .persistent();
 }
 
+// Unified Telegram sender used across patches (additive).
+async function sendTelegramToRole(role, tgId, text, extra = {}) {
+  try {
+    const bot = role === 'passenger' ? passengerBot : role === 'driver' ? driverBot : role === 'admin' ? adminBot : null;
+    if (!bot) return;
+    await bot.telegram.sendMessage(Number(tgId), String(text), {
+      disable_web_page_preview: true,
+      disable_notification: false,
+      ...extra
+    });
+  } catch (e) {
+    // best-effort
+  }
+}
+
 if (passengerBot) {
   passengerBot.start(async (ctx) => {
     const pt = signPtToken(ctx.from.id, 'passenger');
@@ -265,6 +280,133 @@ async function driversHaveOnlineCols(){
     _driversOnlineCols = false;
   }
   return _driversOnlineCols;
+}
+
+// ---- Auto dispatch (round-robin with optional nearest if driver location exists)
+let _driversLocCols = null;
+async function driversHaveLocationCols(){
+  if (_driversLocCols !== null) return _driversLocCols;
+  try{
+    const q = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_name='drivers' AND column_name='last_lat'
+       LIMIT 1`
+    );
+    _driversLocCols = !!q.rows[0];
+  }catch(_){
+    _driversLocCols = false;
+  }
+  return _driversLocCols;
+}
+
+async function ensureDispatchTables(){
+  // Additive: driver last known location (used for nearest dispatch if available)
+  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;`).catch(()=>{});
+  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lon DOUBLE PRECISION;`).catch(()=>{});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_last_latlon ON drivers(last_lat, last_lon);`).catch(()=>{});
+
+  // Additive: single-row dispatch state
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dispatch_state (
+      id INT PRIMARY KEY DEFAULT 1,
+      last_driver_id BIGINT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(()=>{});
+  await pool.query(`INSERT INTO dispatch_state(id,last_driver_id) VALUES (1,NULL) ON CONFLICT (id) DO NOTHING;`).catch(()=>{});
+}
+
+function dist2(aLat, aLon, bLat, bLon){
+  const dx = Number(aLat) - Number(bLat);
+  const dy = Number(aLon) - Number(bLon);
+  return dx*dx + dy*dy;
+}
+
+async function autoAssignRide(rideId){
+  await ensureDispatchTables();
+  const client = await pool.connect();
+  try{
+    await client.query('BEGIN');
+    // One-at-a-time dispatcher lock
+    await client.query('SELECT pg_advisory_xact_lock(424242)');
+
+    const rideQ = await client.query(
+      `SELECT id, status, pickup_lat, pickup_lon, pickup_text, drop_text, distance_km, fare
+       FROM rides WHERE id=$1 FOR UPDATE`,
+      [rideId]
+    );
+    const ride = rideQ.rows[0];
+    if (!ride || ride.status !== 'searching') {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    const driversQ = await client.query(
+      `SELECT d.id, d.last_lat, d.last_lon, d.balance,
+              u.tg_id AS driver_tg_id, u.first_name AS driver_first_name, u.username AS driver_username
+       FROM drivers d
+       JOIN users u ON u.id = d.user_id
+       WHERE d.status='approved'
+         AND COALESCE(d.is_online,false)=true
+         AND d.balance > $1
+         AND NOT EXISTS (SELECT 1 FROM rides r WHERE r.driver_id=d.id AND r.status IN ('assigned','started'))
+       ORDER BY d.id ASC`,
+      [DRIVER_BLOCK_AT]
+    );
+    const drivers = driversQ.rows;
+    if (!drivers.length) {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    // Choose driver: nearest if location exists; else round-robin
+    const hasLoc = await driversHaveLocationCols();
+    const withLoc = hasLoc ? drivers.filter(d => d.last_lat !== null && d.last_lon !== null) : [];
+    let chosen = null;
+
+    if (withLoc.length) {
+      chosen = withLoc.reduce((best, d) => {
+        if (!best) return d;
+        const bd = dist2(ride.pickup_lat, ride.pickup_lon, best.last_lat, best.last_lon);
+        const dd = dist2(ride.pickup_lat, ride.pickup_lon, d.last_lat, d.last_lon);
+        return dd < bd ? d : best;
+      }, null);
+    } else {
+      const stQ = await client.query('SELECT last_driver_id FROM dispatch_state WHERE id=1 FOR UPDATE');
+      const last = stQ.rows[0]?.last_driver_id ?? null;
+      chosen = drivers.find(d => last === null || Number(d.id) > Number(last)) || drivers[0];
+      await client.query('UPDATE dispatch_state SET last_driver_id=$1, updated_at=NOW() WHERE id=1', [chosen.id]);
+    }
+
+    const upd = await client.query(
+      `UPDATE rides
+       SET driver_id=$1, status='assigned', updated_at=NOW()
+       WHERE id=$2 AND status='searching'
+       RETURNING *`,
+      [chosen.id, ride.id]
+    );
+    const assignedRide = upd.rows[0];
+    await client.query('COMMIT');
+
+    if (assignedRide?.id && chosen?.driver_tg_id) {
+      const pt = signPtToken(chosen.driver_tg_id, 'driver');
+      const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
+      const msg = `🚖 Yeni sifariş (#${assignedRide.id})\n` +
+        `${assignedRide.pickup_text || 'Pick-up'} → ${assignedRide.drop_text || 'Drop'}\n` +
+        `Məsafə: ${Number(assignedRide.distance_km).toFixed(2)} km\n` +
+        `Qiymət: ${Number(assignedRide.fare).toFixed(2)} AZN`;
+      await sendTelegramToRole('driver', chosen.driver_tg_id, msg, {
+        ...webAppButton('🚖 Sifarişi aç', url)
+      });
+    }
+
+    return { ride: assignedRide, driver: chosen };
+  } catch (e) {
+    try{ await client.query('ROLLBACK'); }catch{}
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 function getDriverToken(req){
@@ -562,7 +704,15 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
      RETURNING *`,
     [passenger.id, pickup_lat, pickup_lon, pickup_text || null, drop_lat, drop_lon, drop_text || null, dist, fare, commission]
   );
-  res.json({ ok: true, ride: rideQ.rows[0] });
+  let ride = rideQ.rows[0];
+  // Auto-assign to an eligible online driver (best-effort; keeps "searching" if none)
+  try{
+    const assigned = await autoAssignRide(ride.id);
+    if (assigned?.ride) ride = assigned.ride;
+  }catch(e){
+    console.error('autoAssignRide failed (non-fatal):', e?.message || e);
+  }
+  res.json({ ok: true, ride });
 });
 
 // passenger: check ride status
@@ -762,7 +912,7 @@ app.get('/api/driver/session_me', requireTelegram('driver'), requireDriverSessio
 
 // driver: set online/offline (if drivers.is_online exists)
 app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSession, async (req, res) => {
-  const { online } = req.body || {};
+  const { online, lat, lon } = req.body || {};
   const want = !!online;
   const hasCols = await driversHaveOnlineCols();
   if (!hasCols) return res.json({ ok:true, applied:false, online: want });
@@ -771,10 +921,19 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
   try{
     await pool.query('SAVEPOINT sp_online');
     try{
-      await pool.query(
-        `UPDATE drivers SET is_online=$1, online_updated_at=NOW() WHERE id=$2`,
-        [want, req.driver.id]
-      );
+      // Optional location update (used for nearest dispatch). Only applied if columns exist.
+      const hasLoc = await driversHaveLocationCols();
+      if (hasLoc && typeof lat === 'number' && typeof lon === 'number') {
+        await pool.query(
+          `UPDATE drivers SET is_online=$1, online_updated_at=NOW(), last_lat=$3, last_lon=$4 WHERE id=$2`,
+          [want, req.driver.id, lat, lon]
+        );
+      } else {
+        await pool.query(
+          `UPDATE drivers SET is_online=$1, online_updated_at=NOW() WHERE id=$2`,
+          [want, req.driver.id]
+        );
+      }
     }catch(e1){
       // fallback if online_updated_at column is missing
       await pool.query('ROLLBACK TO SAVEPOINT sp_online');
@@ -784,6 +943,15 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
       );
     }
     await pool.query('COMMIT');
+
+    // If driver just went online, try to auto-assign the oldest searching ride (best-effort)
+    if (want) {
+      try{
+        const q = await pool.query(`SELECT id FROM rides WHERE status='searching' ORDER BY id ASC LIMIT 1`);
+        if (q.rows[0]) await autoAssignRide(Number(q.rows[0].id));
+      }catch(_){ }
+    }
+
     return res.json({ ok:true, applied:true, online: want });
   }catch(e){
     // If columns are missing in this DB, avoid aborting the transaction.
@@ -1044,6 +1212,8 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
 const PORT = process.env.PORT || 10000;
 
 await ensureSchema();
+// Additive: ensure optional tables/columns for dispatch are present.
+await ensureDispatchTables();
 
 app.listen(PORT, () => {
   console.log(`PayTaksi server listening on :${PORT}`);
