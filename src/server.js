@@ -842,6 +842,34 @@ app.post('/api/admin/driver_status', adminAuth, async (req, res) => {
   const { driver_id, status, note } = req.body || {};
   if (!['pending','approved','rejected','blocked'].includes(status)) return res.status(400).json({ ok: false, error: 'bad_status' });
   const q = await pool.query(`UPDATE drivers SET status=$1 WHERE id=$2 RETURNING *`, [status, driver_id]);
+
+  // Notify driver on approval (best-effort; never breaks admin flow)
+  if (status === 'approved' && driverBot && q.rows[0]) {
+    try {
+      const infoQ = await pool.query(
+        `SELECT u.tg_id, u.first_name, u.username
+         FROM drivers d
+         JOIN users u ON u.id=d.user_id
+         WHERE d.id=$1`,
+        [driver_id]
+      );
+      const u = infoQ.rows[0];
+      if (u && u.tg_id) {
+        const pt = signPtToken(Number(u.tg_id), 'driver');
+        const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
+        const name = u.first_name ? `, ${u.first_name}` : '';
+        const text = `✅ Təsdiqləndiniz${name}!\n\nArtıq PayTaksi sürücü panelinə daxil olub login edə bilərsiniz.`;
+        await driverBot.telegram.sendMessage(Number(u.tg_id), text, {
+          ...webAppButton('🚖 Sürücü paneli', url),
+          disable_web_page_preview: true,
+          disable_notification: false
+        });
+      }
+    } catch (e) {
+      console.error('driver approval notify failed', e);
+    }
+  }
+
   res.json({ ok: true, driver: q.rows[0] || null, note: note || null });
 });
 
