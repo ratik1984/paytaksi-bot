@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:0;background:#0f1a2b;color:#fff}
+    .wrap{max-width:720px;margin:0 auto;padding:16px}
+    .card{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:14px;margin:12px 0}
+    input,button,select{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.35);color:#fff;font-size:16px;box-sizing:border-box}
+    button{cursor:pointer;border:none;background:#111;margin-top:10px}
+    .muted{opacity:.8}
+    .row{display:flex;gap:10px}
+    .row > *{flex:1}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);font-size:13px}
+    .list{margin-top:10px}
+    .item{padding:10px;border-radius:14px;border:1px dashed rgba(255,255,255,0.2);margin:10px 0}
+    .btn2{background:#222}
+    .danger{background:#7a1212}
+    a{color:#fff}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>PayTaksi 🚕 <span id="rolePill" class="pill"></span></h2>
+
+    <div class="card" id="passengerBox" style="display:none;">
+      <div class="muted">Sərnişin: mövcud yer və gedəcəyin yeri yaz, sifariş ver.</div>
+      <input id="fromTitle" placeholder="Mövcud yeriniz (GPS ilə avtomatik yazılacaq)" />
+      <div class="row">
+        <input id="fromLat" placeholder="lat" />
+        <input id="fromLng" placeholder="lng" />
+      </div>
+
+      <input id="toTitle" placeholder="Gedəcəyiniz yer" />
+      <div class="row">
+        <input id="toLat" placeholder="lat" />
+        <input id="toLng" placeholder="lng" />
+      </div>
+
+      <button id="createRideBtn">🚕 Sifariş ver</button>
+      <div id="createInfo" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card" id="driverBox" style="display:none;">
+      <div class="muted">Sürücü: axtarışdakı sifarişlər. Qəbul et və chat yaz.</div>
+      <button id="refreshSearching" class="btn2">🔄 Yenilə</button>
+      <div id="searchingList" class="list"></div>
+    </div>
+
+    <div class="card" id="ridesBox">
+      <div class="muted">Son sifarişlər</div>
+      <button id="refreshRides" class="btn2">🔄 Yenilə</button>
+      <div id="ridesList" class="list"></div>
+    </div>
+
+    <div class="card" id="chatBox" style="display:none;">
+      <div class="muted">Chat</div>
+      <div id="chatList" class="list"></div>
+      <input id="chatMsg" placeholder="Mesaj yaz..." />
+      <button id="sendChat">Göndər</button>
+    </div>
+
+    <div class="card">
+      <div class="muted">Problem varsa: <span id="dbg"></span></div>
+    </div>
+  </div>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="/app/app.js"></script>
+</body>
+</html>

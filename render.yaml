@@ -1,29 +1,12 @@
 services:
   - type: web
-    name: paytaksi-telegram
+    name: paytaksi-bot
     env: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_URL
-        sync: false
-      - key: APP_BASE_URL
-        sync: false
-      - key: PASSENGER_BOT_TOKEN
-        sync: false
-      - key: DRIVER_BOT_TOKEN
-        sync: false
-      - key: ADMIN_BOT_TOKEN
-        sync: false
-      - key: ADMIN_WEB_USER
-        value: Ratik
-      - key: ADMIN_WEB_PASS
-        value: "0123456789"
-      - key: WEBHOOK_SECRET
-        sync: false
-databases:
-  - name: paytaksi-db
-    plan: free
+      - key: NODE_VERSION
+        value: 22.2.0
+      - key: WEB_CONCURRENCY
+        value: 1
