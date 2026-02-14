@@ -551,6 +551,24 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
         }
       }
 
+      // Best-effort cancellation audit log for admin statistics.
+      // Must never break cancellation flow if the table doesn't exist.
+      await client.query('SAVEPOINT cancel_audit');
+      try {
+        await client.query(
+          `INSERT INTO ride_cancellations (ride_id, actor_role, actor_tg_id, reason)
+           VALUES ($1,'passenger',$2,$3)`,
+          [ride_id, Number(req.tgUser?.id) || null, reason]
+        );
+      } catch (e3) {
+        // 42P01 = undefined_table
+        if (e3 && e3.code === '42P01') {
+          await client.query('ROLLBACK TO SAVEPOINT cancel_audit');
+        } else {
+          throw e3;
+        }
+      }
+
       await client.query('COMMIT');
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch {}
@@ -579,6 +597,80 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
     return res.json({ ok: true });
   } catch (e) {
     console.error('cancel_ride error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// ---- Admin: cancellation statistics (top reasons)
+app.get('/api/admin/cancel_stats', adminAuth, async (req, res) => {
+  const daysRaw = String(req.query?.days || '30');
+  const days = daysRaw === 'all' ? null : Math.max(1, Math.min(365, Number(daysRaw) || 30));
+  const fromExpr = days ? `NOW() - ($1::int * INTERVAL '1 day')` : null;
+
+  // Try the audit table first; if it doesn't exist, fall back to rides.cancelled_reason when present.
+  try {
+    if (days) {
+      const q = await pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(reason), ''), '(Səbəb göstərilməyib)') AS reason,
+                COUNT(*)::int AS c
+         FROM ride_cancellations
+         WHERE created_at >= ${fromExpr}
+         GROUP BY 1
+         ORDER BY c DESC, reason ASC
+         LIMIT 50`,
+        [days]
+      );
+      return res.json({ ok: true, source: 'ride_cancellations', days, items: q.rows });
+    } else {
+      const q = await pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(reason), ''), '(Səbəb göstərilməyib)') AS reason,
+                COUNT(*)::int AS c
+         FROM ride_cancellations
+         GROUP BY 1
+         ORDER BY c DESC, reason ASC
+         LIMIT 50`
+      );
+      return res.json({ ok: true, source: 'ride_cancellations', days: 'all', items: q.rows });
+    }
+  } catch (e1) {
+    if (!(e1 && e1.code === '42P01')) {
+      console.error('cancel_stats audit query error:', e1);
+      return res.status(500).json({ ok: false, error: 'server_error' });
+    }
+  }
+
+  // Fallback: rides.cancelled_reason (if column exists)
+  try {
+    if (days) {
+      const q = await pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(cancelled_reason), ''), '(Səbəb göstərilməyib)') AS reason,
+                COUNT(*)::int AS c
+         FROM rides
+         WHERE status='cancelled' AND updated_at >= ${fromExpr}
+         GROUP BY 1
+         ORDER BY c DESC, reason ASC
+         LIMIT 50`,
+        [days]
+      );
+      return res.json({ ok: true, source: 'rides.cancelled_reason', days, items: q.rows });
+    } else {
+      const q = await pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(cancelled_reason), ''), '(Səbəb göstərilməyib)') AS reason,
+                COUNT(*)::int AS c
+         FROM rides
+         WHERE status='cancelled'
+         GROUP BY 1
+         ORDER BY c DESC, reason ASC
+         LIMIT 50`
+      );
+      return res.json({ ok: true, source: 'rides.cancelled_reason', days: 'all', items: q.rows });
+    }
+  } catch (e2) {
+    // 42703 = undefined_column
+    if (e2 && e2.code === '42703') {
+      return res.json({ ok: true, source: 'none', days: days || 'all', items: [] });
+    }
+    console.error('cancel_stats rides query error:', e2);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });

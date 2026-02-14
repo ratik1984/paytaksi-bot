@@ -52,6 +52,21 @@
     <div id="rides"></div>
   </div>
 
+  <div class="card">
+    <b>Ləğv səbəbləri statistikası</b>
+    <div class="two" style="margin-top:8px">
+      <select id="cancelDays">
+        <option value="7">Son 7 gün</option>
+        <option value="30" selected>Son 30 gün</option>
+        <option value="90">Son 90 gün</option>
+        <option value="all">Bütün vaxt</option>
+      </select>
+      <button id="btnCancelRefresh">🔄 Yenilə</button>
+    </div>
+    <div class="muted" id="cancelMeta" style="margin-top:8px">—</div>
+    <div id="cancelStats" style="margin-top:8px"></div>
+  </div>
+
 <script>
 Telegram.WebApp.ready();
 Telegram.WebApp.expand();
@@ -168,6 +183,25 @@ async function refresh(){
       box.appendChild(div);
     });
   }catch(e){}
+
+  try{
+    const days = document.getElementById('cancelDays').value;
+    const cs = await adminApi('/api/admin/cancel_stats?days=' + encodeURIComponent(days));
+    document.getElementById('cancelMeta').textContent = `Mənbə: ${cs.source} • Aralıq: ${cs.days}`;
+    const box = document.getElementById('cancelStats');
+    box.innerHTML='';
+    const items = cs.items || [];
+    if (!items.length){
+      box.innerHTML = '<div class="muted">Hələ məlumat yoxdur.</div>';
+    } else {
+      items.forEach((it, idx)=>{
+        const div = document.createElement('div');
+        div.className='item';
+        div.innerHTML = `<b>${idx+1}.</b> ${it.reason} <span class="muted">• ${it.c}</span>`;
+        box.appendChild(div);
+      });
+    }
+  }catch(e){}
 }
 
 (function init(){
@@ -177,6 +211,8 @@ async function refresh(){
   refresh();
   setInterval(refresh, 6000);
 })();
+
+document.getElementById('btnCancelRefresh').onclick = ()=> refresh();
 </script>
 </body>
 </html>
