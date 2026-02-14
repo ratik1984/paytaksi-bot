@@ -103,24 +103,6 @@ function calcFare(distanceKm) {
   return money2(BASE_FARE + extra);
 }
 
-// ---- DB helpers
-// Some installations may have an older `rides` table without the new cancel metadata columns.
-// We keep cancellation working even if the SQL patch wasn't applied yet.
-const _ridesColsCache = { ts: 0, cols: null };
-async function getRidesColumns() {
-  const now = Date.now();
-  if (_ridesColsCache.cols && now - _ridesColsCache.ts < 60_000) return _ridesColsCache.cols;
-  const q = await pool.query(
-    `SELECT column_name
-     FROM information_schema.columns
-     WHERE table_schema='public' AND table_name='rides'`
-  );
-  const cols = new Set((q.rows || []).map((r) => r.column_name));
-  _ridesColsCache.ts = now;
-  _ridesColsCache.cols = cols;
-  return cols;
-}
-
 async function ensureSchema() {
   const { default: fs } = await import('fs');
   const schema = fs.readFileSync(path.resolve('db/schema.sql'), 'utf8');
@@ -515,64 +497,79 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 
     const passenger = await upsertUser(req.tgUser, 'passenger');
 
-    // Lock row to avoid race with driver accept/start
+    // Lock ONLY the rides row (Postgres doesn't allow FOR UPDATE on the nullable side of LEFT JOIN)
     const client = await pool.connect();
     let ride;
     try {
       await client.query('BEGIN');
+
       const rideQ = await client.query(
-        `SELECT r.*, d.id as driver_id2, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
-         FROM rides r
-         LEFT JOIN drivers d ON d.id = r.driver_id
-         LEFT JOIN users u ON u.id = d.user_id
-         WHERE r.id=$1 AND r.passenger_user_id=$2
+        `SELECT *
+         FROM rides
+         WHERE id=$1 AND passenger_user_id=$2
          FOR UPDATE`,
         [ride_id, passenger.id]
       );
       ride = rideQ.rows[0];
+
       if (!ride) {
         await client.query('ROLLBACK');
-        client.release();
         return res.status(404).json({ ok: false, error: 'ride_not_found' });
       }
 
       if (!['searching', 'assigned'].includes(ride.status)) {
         await client.query('ROLLBACK');
-        client.release();
         return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
       }
 
-      // Backward-compatible UPDATE: if cancel metadata columns don't exist, update only `status` + `updated_at`.
-      const cols = await getRidesColumns();
-      const hasMeta = cols.has('cancelled_at') && cols.has('cancelled_by') && cols.has('cancelled_reason');
-      const upd = hasMeta
-        ? await client.query(
-            `UPDATE rides
-             SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
-             WHERE id=$1
-             RETURNING *`,
-            [ride_id, reason]
-          )
-        : await client.query(
+      // Backward compatible update: if cancel columns are not present, fall back to status only.
+      try {
+        const upd = await client.query(
+          `UPDATE rides
+           SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
+           WHERE id=$1
+           RETURNING *`,
+          [ride_id, reason]
+        );
+        ride = { ...ride, ...upd.rows[0] };
+      } catch (e2) {
+        // 42703 = undefined_column
+        if (e2 && e2.code === '42703') {
+          const upd = await client.query(
             `UPDATE rides
              SET status='cancelled', updated_at=NOW()
              WHERE id=$1
              RETURNING *`,
             [ride_id]
           );
-      ride = { ...ride, ...upd.rows[0] };
+          ride = { ...ride, ...upd.rows[0] };
+        } else {
+          throw e2;
+        }
+      }
+
       await client.query('COMMIT');
-      client.release();
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch {}
-      client.release();
       throw e;
+    } finally {
+      client.release();
     }
 
     // Notify driver if already assigned (best-effort)
-    if (ride.driver_tg_id) {
-      const msg = `❌ Sifariş ləğv edildi (#${ride_id}).\n\n📍 ${ride.pickup_text || ''}\n➡️ ${ride.drop_text || ''}${reason ? `\n\nSəbəb: ${reason}` : ''}`;
-      await sendTelegram('driver', ride.driver_tg_id, msg);
+    if (ride.driver_id) {
+      const dQ = await pool.query(
+        `SELECT u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
+         FROM drivers d
+         JOIN users u ON u.id = d.user_id
+         WHERE d.id=$1`,
+        [ride.driver_id]
+      );
+      const d = dQ.rows?.[0];
+      if (d?.driver_tg_id) {
+        const msg = `❌ Sifariş ləğv edildi (#${ride_id}).\n\n📍 ${ride.pickup_text || ''}\n➡️ ${ride.drop_text || ''}${reason ? `\n\nSəbəb: ${reason}` : ''}`;
+        await sendTelegram('driver', d.driver_tg_id, msg);
+      }
     }
 
     return res.json({ ok: true });
