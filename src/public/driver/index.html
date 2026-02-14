@@ -113,15 +113,23 @@
       <div class="muted" id="activeInfo">—</div>
       <div class="row" style="margin-top:10px">
         <div class="two">
-          <button id="btnRoute" type="button">🗺 Marşrut</button>
-          <button id="btnPickupMap" type="button">📍 Pick-up xəritə</button>
+          <button id="btnNavPickupWaze" type="button">🧭 Waze (Müştəriyə)</button>
+          <button id="btnNavPickupGmaps" type="button">🧭 Google (Müştəriyə)</button>
+        </div>
+        <div class="two">
+          <button id="btnArrived" type="button">📍 Çatdım</button>
+          <button id="btnNavDropWaze" type="button" class="hide">🧭 Waze (Ünvana)</button>
+        </div>
+        <div class="two">
+          <button id="btnNavDropGmaps" type="button" class="hide">🧭 Google (Ünvana)</button>
+          <button id="btnRoute" type="button" class="hide">🗺 Tam marşrut</button>
         </div>
         <div class="two">
           <button id="btnCustomerChat" type="button">💬 Müştəri ilə əlaqə</button>
           <button id="btnCustomerCall" type="button">📞 Zəng (Telegram)</button>
         </div>
         <div class="two">
-          <button id="btnStartRide" type="button">▶️ Başla</button>
+          <button id="btnStartRide" type="button">▶️ Gedişə başla</button>
           <button id="btnCompleteRide" type="button">✅ Bitir</button>
         </div>
       </div>
@@ -401,7 +409,13 @@ async function loadOpenRides(){
         try{
           await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
           alert('Qəbul edildi ✅');
+          // accept -> focus on active ride and open pickup navigation
+          setRideStage(r.id, 'to_pickup');
+          await loadActiveRide();
           await loadOpenRides();
+          try{
+            if (__activeRide?.id === r.id) openExternal(wazeUrl(__activeRide.pickup_lat, __activeRide.pickup_lon));
+          }catch{}
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
       div.querySelector('[data-rej]').onclick = async ()=>{
@@ -426,7 +440,13 @@ async function loadOpenRides(){
         try{
           await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
           alert('Qəbul edildi ✅');
+          // accept -> focus on active ride and open pickup navigation
+          setRideStage(r.id, 'to_pickup');
+          await loadActiveRide();
           await loadOpenRides();
+          try{
+            if (__activeRide?.id === r.id) openExternal(wazeUrl(__activeRide.pickup_lat, __activeRide.pickup_lon));
+          }catch{}
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
       ridesEl.appendChild(div);
@@ -453,6 +473,31 @@ function openTgLink(url){
   }catch{ window.open(url,'_blank'); }
 }
 
+function openExternal(url){
+  try{
+    if (Telegram?.WebApp?.openLink) Telegram.WebApp.openLink(url);
+    else window.open(url,'_blank');
+  }catch{ window.open(url,'_blank'); }
+}
+
+function wazeUrl(lat, lon){
+  const ll = `${lat},${lon}`;
+  return `https://waze.com/ul?ll=${encodeURIComponent(ll)}&navigate=yes`;
+}
+
+function gmapsNavUrl(lat, lon){
+  const d = `${lat},${lon}`;
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(d)}`;
+}
+
+function getRideStage(rideId){
+  try{ return localStorage.getItem('pt_stage_'+rideId) || 'to_pickup'; }catch{ return 'to_pickup'; }
+}
+
+function setRideStage(rideId, stage){
+  try{ localStorage.setItem('pt_stage_'+rideId, stage); }catch{}
+}
+
 let __activeRideId = null;
 let __activeRide = null;
 
@@ -471,21 +516,38 @@ async function loadActiveRide(){
       `Məsafə: <b>${Number(r.distance_km).toFixed(2)} km</b> • Qiymət: <b>${Number(r.fare).toFixed(2)} AZN</b><br>`+
       `Müştəri: <b>${passName}</b>`;
 
-    // Buttons
-    const origin = `${r.pickup_lat},${r.pickup_lon}`;
-    const dest = `${r.drop_lat},${r.drop_lon}`;
-    document.getElementById('btnRoute').onclick = ()=>{
-      const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(dest)}`;
-      openTgLink(url);
-    };
-    document.getElementById('btnPickupMap').onclick = ()=>{
-      const url = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(r.pickup_lat)}&mlon=${encodeURIComponent(r.pickup_lon)}#map=16/${encodeURIComponent(r.pickup_lat)}/${encodeURIComponent(r.pickup_lon)}`;
-      openTgLink(url);
+    // Stage-based navigation: accept -> go to pickup, then "Çatdım" -> go to drop & enable start
+    const stage = getRideStage(r.id);
+    const isToPickup = (stage !== 'to_drop');
+
+    const btnDropW = document.getElementById('btnNavDropWaze');
+    const btnDropG = document.getElementById('btnNavDropGmaps');
+    const btnRoute = document.getElementById('btnRoute');
+    btnDropW.classList.toggle('hide', isToPickup);
+    btnDropG.classList.toggle('hide', isToPickup);
+    btnRoute.classList.toggle('hide', true); // optional (kept hidden)
+
+    document.getElementById('btnNavPickupWaze').onclick = ()=> openExternal(wazeUrl(r.pickup_lat, r.pickup_lon));
+    document.getElementById('btnNavPickupGmaps').onclick = ()=> openExternal(gmapsNavUrl(r.pickup_lat, r.pickup_lon));
+    btnDropW.onclick = ()=> openExternal(wazeUrl(r.drop_lat, r.drop_lon));
+    btnDropG.onclick = ()=> openExternal(gmapsNavUrl(r.drop_lat, r.drop_lon));
+
+    document.getElementById('btnArrived').onclick = ()=>{
+      setRideStage(r.id, 'to_drop');
+      btnDropW.classList.remove('hide');
+      btnDropG.classList.remove('hide');
+      // open destination navigation immediately
+      openExternal(wazeUrl(r.drop_lat, r.drop_lon));
+      // enable start ride
+      document.getElementById('btnStartRide').disabled = false;
     };
     document.getElementById('btnCustomerChat').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
     document.getElementById('btnCustomerCall').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
 
-    document.getElementById('btnStartRide').onclick = async ()=>{
+    // UX: "Gedişə başla" is enabled after "Çatdım".
+    const btnStart = document.getElementById('btnStartRide');
+    btnStart.disabled = isToPickup;
+    btnStart.onclick = async ()=>{
       try{
         await api('/api/driver/start',{method:'POST',body:{ride_id:r.id}});
         await loadActiveRide();
