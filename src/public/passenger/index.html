@@ -15,6 +15,8 @@
     .muted{color:#666;font-size:13px}
     .list{margin-top:8px}
     .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
+    .btnSmall{padding:8px 10px;border-radius:10px;border:0;background:#b00020;color:#fff;font-size:14px;width:auto}
+    .actions{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   </style>
 </head>
 <body>
@@ -194,11 +196,28 @@ async function loadRides(){
       const div = document.createElement('div');
       div.className='item';
       const drv = r.driver_id ? `Sürücü: ${r.driver_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
+      const canCancel = (r.status === 'searching' || r.status === 'assigned');
       div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN<br>
-        <span class="muted">${drv}</span>`;
+        <span class="muted">${drv}</span>
+        ${canCancel ? `<div class="actions"><button class="btnSmall" data-cancel="${r.id}">❌ Ləğv et</button><span class="muted">(Sifarişin ləğv edilməsi sürücüyə bildiriləcək)</span></div>` : ''}`;
       ridesEl.appendChild(div);
+
+      if (canCancel){
+        const btn = div.querySelector('[data-cancel]');
+        btn.onclick = async ()=>{
+          if (!confirm(`#${r.id} sifarişi ləğv edilsin?`)) return;
+          try{
+            btn.disabled = true;
+            await api('/api/passenger/cancel_ride',{method:'POST',body:{ride_id: Number(r.id)}});
+            setStatus(statusEl,`Sifariş #${r.id} ləğv edildi ✅`);
+            await loadRides();
+          }catch(e){
+            setStatus(statusEl,'Ləğv edilə bilmədi: '+(e.data?.error||e.message), false);
+          }finally{ btn.disabled = false; }
+        };
+      }
     });
     if (!data.rides?.length) ridesEl.innerHTML = '<div class="muted">Hələ sifariş yoxdur.</div>';
   }catch(e){}

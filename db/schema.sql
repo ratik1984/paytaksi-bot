@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS rides (
   fare NUMERIC(12,2) NOT NULL,
   commission NUMERIC(12,2) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  cancelled_at TIMESTAMPTZ,
+  cancelled_by TEXT,
+  cancelled_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS rides_status_idx ON rides(status);

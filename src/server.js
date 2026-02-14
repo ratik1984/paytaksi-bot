@@ -132,6 +132,20 @@ const passengerBot = TOKENS.passenger ? new Telegraf(TOKENS.passenger) : null;
 const driverBot = TOKENS.driver ? new Telegraf(TOKENS.driver) : null;
 const adminBot = TOKENS.admin ? new Telegraf(TOKENS.admin) : null;
 
+// Simple telegram notifier (best-effort)
+async function sendTelegram(role, chatId, text, extra = {}) {
+  try {
+    const bot = role === 'passenger' ? passengerBot : role === 'driver' ? driverBot : adminBot;
+    if (!bot) return { ok: false, error: 'bot_not_configured' };
+    if (!chatId) return { ok: false, error: 'chat_id_required' };
+    await bot.telegram.sendMessage(Number(chatId), String(text), extra);
+    return { ok: true };
+  } catch (e) {
+    console.error('sendTelegram failed:', role, e?.message || e);
+    return { ok: false, error: 'send_failed' };
+  }
+}
+
 function webAppButton(text, url) {
   return Markup.keyboard([[Markup.button.webApp(text, url)]])
     .resize()
@@ -477,26 +491,64 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
   try {
-    const passenger_tg_id = String(req.tgUser.id);
-    const ride_id = Number(req.body.ride_id);
+    const ride_id = Number(req.body?.ride_id);
+    const reason = String(req.body?.reason || '').trim().slice(0, 200) || null;
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
-    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    const passenger = await upsertUser(req.tgUser, 'passenger');
 
-    if (!['searching','assigned'].includes(ride.status)) {
-      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+    // Lock row to avoid race with driver accept/start
+    const client = await pool.connect();
+    let ride;
+    try {
+      await client.query('BEGIN');
+      const rideQ = await client.query(
+        `SELECT r.*, d.id as driver_id2, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
+         FROM rides r
+         LEFT JOIN drivers d ON d.id = r.driver_id
+         LEFT JOIN users u ON u.id = d.user_id
+         WHERE r.id=$1 AND r.passenger_user_id=$2
+         FOR UPDATE`,
+        [ride_id, passenger.id]
+      );
+      ride = rideQ.rows[0];
+      if (!ride) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(404).json({ ok: false, error: 'ride_not_found' });
+      }
+
+      if (!['searching', 'assigned'].includes(ride.status)) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+      }
+
+      const upd = await client.query(
+        `UPDATE rides
+         SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
+         WHERE id=$1
+         RETURNING *`,
+        [ride_id, reason]
+      );
+      ride = { ...ride, ...upd.rows[0] };
+      await client.query('COMMIT');
+      client.release();
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch {}
+      client.release();
+      throw e;
     }
 
-    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
-
+    // Notify driver if already assigned (best-effort)
     if (ride.driver_tg_id) {
-      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
+      const msg = `❌ Sifariş ləğv edildi (#${ride_id}).\n\n📍 ${ride.pickup_text || ''}\n➡️ ${ride.drop_text || ''}${reason ? `\n\nSəbəb: ${reason}` : ''}`;
+      await sendTelegram('driver', ride.driver_tg_id, msg);
     }
 
     return res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error('cancel_ride error:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
@@ -513,7 +565,9 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
      LIMIT 10`,
     [passenger.id]
   );
-  res.json({ ok: true, rides: q.rows });
+  // Backward-compatible alias used by the passenger UI
+  const rides = (q.rows || []).map((r) => ({ ...r, driver_name: r.driver_first_name || null }));
+  res.json({ ok: true, rides });
 });
 
 // ---- Driver: register + upload docs
