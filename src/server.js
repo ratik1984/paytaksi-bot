@@ -9,7 +9,6 @@ import multer from 'multer';
 import { pool } from './db.js';
 import { validateTelegramWebAppData } from './telegramAuth.js';
 import { Telegraf, Markup } from 'telegraf';
-import crypto from 'crypto';
 
 dotenv.config();
 
@@ -25,45 +24,6 @@ app.use(express.urlencoded({ extended: true }));
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'CHANGE_ME_SECRET';
-
-// --- Signed token fallback for WebApp auth when Telegram initData is empty ---
-// Token: base64url(JSON payload) + '.' + base64url(HMAC_SHA256(payloadB64, WEBHOOK_SECRET))
-// Payload: { uid:number, role:'passenger'|'driver'|'admin', iat:number }
-function b64urlEncode(input) {
-  return Buffer.from(input)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
-function b64urlDecode(str) {
-  const s = String(str).replace(/-/g, '+').replace(/_/g, '/');
-  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
-  return Buffer.from(s + pad, 'base64');
-}
-function signPtToken(uid, role) {
-  const payloadObj = { uid: Number(uid), role, iat: Math.floor(Date.now() / 1000) };
-  const payloadB64 = b64urlEncode(JSON.stringify(payloadObj));
-  const sig = crypto.createHmac('sha256', WEBHOOK_SECRET).update(payloadB64).digest();
-  const sigB64 = b64urlEncode(sig);
-  return `${payloadB64}.${sigB64}`;
-}
-function verifyPtToken(token) {
-  try {
-    const [payloadB64, sigB64] = String(token || '').split('.');
-    if (!payloadB64 || !sigB64) return { ok: false, reason: 'bad_token_format' };
-    const expected = crypto.createHmac('sha256', WEBHOOK_SECRET).update(payloadB64).digest();
-    const got = b64urlDecode(sigB64);
-    if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected)) return { ok: false, reason: 'bad_token_signature' };
-    const payload = JSON.parse(b64urlDecode(payloadB64).toString('utf8'));
-    if (!payload?.uid || !payload?.role || !payload?.iat) return { ok: false, reason: 'bad_token_payload' };
-    const age = Math.floor(Date.now() / 1000) - Number(payload.iat);
-    if (age < 0 || age > 7 * 24 * 3600) return { ok: false, reason: 'token_expired' };
-    return { ok: true, payload };
-  } catch {
-    return { ok: false, reason: 'token_parse_failed' };
-  }
-}
 
 const TOKENS = {
   passenger: process.env.PASSENGER_BOT_TOKEN,
@@ -132,21 +92,6 @@ const passengerBot = TOKENS.passenger ? new Telegraf(TOKENS.passenger) : null;
 const driverBot = TOKENS.driver ? new Telegraf(TOKENS.driver) : null;
 const adminBot = TOKENS.admin ? new Telegraf(TOKENS.admin) : null;
 
-
-function safePreview(text, maxLen = 120) {
-  const t = String(text ?? '');
-  return t.length > maxLen ? t.slice(0, maxLen) + '…' : t;
-}
-
-async function notifyPassenger(telegramId, text) {
-  if (!telegramId) return;
-  try { await passengerBot.telegram.sendMessage(telegramId, text); } catch (_) {}
-}
-async function notifyDriver(telegramId, text) {
-  if (!telegramId) return;
-  try { await driverBot.telegram.sendMessage(telegramId, text); } catch (_) {}
-}
-
 function webAppButton(text, url) {
   return Markup.keyboard([[Markup.button.webApp(text, url)]])
     .resize()
@@ -155,24 +100,21 @@ function webAppButton(text, url) {
 
 if (passengerBot) {
   passengerBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'passenger');
-    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/passenger/`;
     await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Sifariş et', url));
   });
 }
 
 if (driverBot) {
   driverBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'driver');
-    const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/driver/`;
     await ctx.reply('PayTaksi 🚖\nSürücü paneli açılır:', webAppButton('🚖 Sürücü paneli', url));
   });
 }
 
 if (adminBot) {
   adminBot.start(async (ctx) => {
-    const pt = signPtToken(ctx.from.id, 'admin');
-    const url = `${APP_BASE_URL}/app/admin/?pt=${encodeURIComponent(pt)}`;
+    const url = `${APP_BASE_URL}/app/admin/`;
     await ctx.reply('PayTaksi 🛠\nAdmin panel açılır:', webAppButton('🛠 Admin panel', url));
   });
 }
@@ -186,24 +128,6 @@ if (adminBot) app.use(adminBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/admin
 function requireTelegram(role) {
   return (req, res, next) => {
     const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
-
-    // Fallback: signed token from query/header (useful if Telegram initData is empty on some clients)
-    if (!initData) {
-      const pt = req.headers['x-pt-token'] || req.body?.pt || req.query?.pt;
-      if (pt) {
-        const v = verifyPtToken(pt);
-        if (v.ok) {
-          if (v.payload.role !== role) {
-            return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'role_mismatch' });
-          }
-          req.tgInitData = '';
-          req.tgUser = { id: Number(v.payload.uid) };
-          req.tgUnsafe = true;
-          req.ptToken = pt;
-          return next();
-        }
-      }
-    }
 
     // Fallback: allow "unsafe" mode when initData is not present (no hash verification).
     if (!initData) {
@@ -505,13 +429,6 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 
     await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
 
-    // Notify assigned driver (if any)
-    if (rideQ.driver_id) {
-      const drv = await db.oneOrNone('SELECT telegram_id FROM users WHERE id=$1', [rideQ.driver_id]);
-      await notifyDriver(drv?.telegram_id, `❌ Sifariş #${rideQ.id} sərnişin tərəfindən ləğv edildi.`);
-    }
-
-
     if (ride.driver_tg_id) {
       try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
     }
@@ -539,118 +456,6 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
 });
 
 // ---- Driver: register + upload docs
-
-// Passenger ↔ Driver chat (per ride)
-app.get('/api/passenger/ride_messages', requireTelegram('passenger'), async (req, res) => {
-  try {
-    const user = req.tgUser;
-    const rideId = Number(req.query.ride_id);
-    const afterId = Number(req.query.after_id || 0);
-    if (!rideId) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-    const ride = await db.oneOrNone('SELECT id, passenger_id, driver_id, status FROM rides WHERE id=$1', [rideId]);
-    if (!ride || ride.passenger_id !== user.id) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-    if (!ride.driver_id) return res.json({ ok: true, messages: [] });
-
-    const msgs = await db.any(
-      `SELECT id, sender_role, message, created_at
-       FROM ride_messages
-       WHERE ride_id=$1 AND id>$2
-       ORDER BY id ASC
-       LIMIT 200`,
-      [rideId, afterId]
-    );
-    return res.json({ ok: true, messages: msgs });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-app.post('/api/passenger/ride_message', requireTelegram('passenger'), async (req, res) => {
-  try {
-    const user = req.tgUser;
-    const rideId = Number(req.body.ride_id);
-    const text = String(req.body.text || '').trim();
-    if (!rideId || !text) return res.status(400).json({ ok: false, error: 'bad_request' });
-    if (text.length > 1000) return res.status(400).json({ ok: false, error: 'too_long' });
-
-    const ride = await db.oneOrNone('SELECT id, passenger_id, driver_id, status FROM rides WHERE id=$1', [rideId]);
-    if (!ride || ride.passenger_id !== user.id) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-    if (!ride.driver_id) return res.status(409).json({ ok: false, error: 'no_driver_yet' });
-    if (!['assigned','started'].includes(ride.status)) return res.status(409).json({ ok: false, error: 'ride_not_active' });
-
-    const msg = await db.one(
-      `INSERT INTO ride_messages (ride_id, sender_role, sender_user_id, message)
-       VALUES ($1,'passenger',$2,$3)
-       RETURNING id, sender_role, message, created_at`,
-      [rideId, user.id, text]
-    );
-
-    const drv = await db.oneOrNone('SELECT telegram_id FROM users WHERE id=$1', [ride.driver_id]);
-    await notifyDriver(drv?.telegram_id, `📩 Yeni mesaj (Sifariş #${rideId}): ${safePreview(text)}`);
-
-    return res.json({ ok: true, message: msg });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-app.get('/api/driver/ride_messages', requireTelegram('driver'), async (req, res) => {
-  try {
-    const user = req.tgUser;
-    const rideId = Number(req.query.ride_id);
-    const afterId = Number(req.query.after_id || 0);
-    if (!rideId) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-    const ride = await db.oneOrNone('SELECT id, passenger_id, driver_id, status FROM rides WHERE id=$1', [rideId]);
-    if (!ride || ride.driver_id !== user.id) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-
-    const msgs = await db.any(
-      `SELECT id, sender_role, message, created_at
-       FROM ride_messages
-       WHERE ride_id=$1 AND id>$2
-       ORDER BY id ASC
-       LIMIT 200`,
-      [rideId, afterId]
-    );
-    return res.json({ ok: true, messages: msgs });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-app.post('/api/driver/ride_message', requireTelegram('driver'), async (req, res) => {
-  try {
-    const user = req.tgUser;
-    const rideId = Number(req.body.ride_id);
-    const text = String(req.body.text || '').trim();
-    if (!rideId || !text) return res.status(400).json({ ok: false, error: 'bad_request' });
-    if (text.length > 1000) return res.status(400).json({ ok: false, error: 'too_long' });
-
-    const ride = await db.oneOrNone('SELECT id, passenger_id, driver_id, status FROM rides WHERE id=$1', [rideId]);
-    if (!ride || ride.driver_id !== user.id) return res.status(404).json({ ok: false, error: 'ride_not_found' });
-    if (!['assigned','started'].includes(ride.status)) return res.status(409).json({ ok: false, error: 'ride_not_active' });
-
-    const msg = await db.one(
-      `INSERT INTO ride_messages (ride_id, sender_role, sender_user_id, message)
-       VALUES ($1,'driver',$2,$3)
-       RETURNING id, sender_role, message, created_at`,
-      [rideId, user.id, text]
-    );
-
-    const pax = await db.oneOrNone('SELECT telegram_id FROM users WHERE id=$1', [ride.passenger_id]);
-    await notifyPassenger(pax?.telegram_id, `📩 Sürücü mesajı (Sifariş #${rideId}): ${safePreview(text)}`);
-
-    return res.json({ ok: true, message: msg });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
 app.post(
   '/api/driver/register',
   requireTelegram('driver'),
@@ -723,26 +528,6 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), async (req, res) =>
   const q = await pool.query(`SELECT * FROM rides WHERE status='searching' ORDER BY id DESC LIMIT 10`);
   res.json({ ok: true, rides: q.rows });
 });
-
-app.get('/api/driver/active_ride', requireTelegram('driver'), async (req, res) => {
-  try {
-    const user = req.tgUser;
-    const ride = await db.oneOrNone(
-      `SELECT r.*, u.first_name AS passenger_first_name
-       FROM rides r
-       JOIN users u ON u.id = r.passenger_user_id
-       WHERE r.driver_tg_id=$1 AND r.status IN ('assigned','started')
-       ORDER BY r.id DESC
-       LIMIT 1`,
-      [String(user.id)]
-    );
-    return res.json({ ok: true, ride });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
 
 // driver: accept ride
 app.post('/api/driver/accept', requireTelegram('driver'), async (req, res) => {
@@ -941,15 +726,3 @@ app.listen(PORT, () => {
   console.log(`PayTaksi server listening on :${PORT}`);
   console.log(`Webhook secret path: /webhook/${WEBHOOK_SECRET}/...`);
 });
-
-    // One active ride at a time
-    const active = await db.oneOrNone(
-      `SELECT id, status FROM rides
-       WHERE passenger_user_id=$1 AND status IN ('searching','assigned','started')
-       ORDER BY id DESC LIMIT 1`,
-      [user.id]
-    );
-    if (active) {
-      return res.status(409).json({ ok: false, error: 'active_ride_exists', ride_id: active.id, status: active.status });
-    }
-
