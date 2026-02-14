@@ -250,6 +250,23 @@ async function ensureDriverAuthTables(){
   `);
 }
 
+// ---- Driver online/offline (additive; optional columns)
+let _driversOnlineCols = null;
+async function driversHaveOnlineCols(){
+  if (_driversOnlineCols !== null) return _driversOnlineCols;
+  try{
+    const q = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_name='drivers' AND column_name='is_online'
+       LIMIT 1`
+    );
+    _driversOnlineCols = !!q.rows[0];
+  }catch(_){
+    _driversOnlineCols = false;
+  }
+  return _driversOnlineCols;
+}
+
 function getDriverToken(req){
   return String(req.headers['x-driver-token'] || '').trim();
 }
@@ -743,6 +760,40 @@ app.get('/api/driver/session_me', requireTelegram('driver'), requireDriverSessio
   return res.json({ ok:true, driver: req.driver, session: { expires_at: req.driverSession.expires_at }});
 });
 
+// driver: set online/offline (if drivers.is_online exists)
+app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+  const { online } = req.body || {};
+  const want = !!online;
+  const hasCols = await driversHaveOnlineCols();
+  if (!hasCols) return res.json({ ok:true, applied:false, online: want });
+
+  await pool.query('BEGIN');
+  try{
+    await pool.query('SAVEPOINT sp_online');
+    try{
+      await pool.query(
+        `UPDATE drivers SET is_online=$1, online_updated_at=NOW() WHERE id=$2`,
+        [want, req.driver.id]
+      );
+    }catch(e1){
+      // fallback if online_updated_at column is missing
+      await pool.query('ROLLBACK TO SAVEPOINT sp_online');
+      await pool.query(
+        `UPDATE drivers SET is_online=$1 WHERE id=$2`,
+        [want, req.driver.id]
+      );
+    }
+    await pool.query('COMMIT');
+    return res.json({ ok:true, applied:true, online: want });
+  }catch(e){
+    // If columns are missing in this DB, avoid aborting the transaction.
+    try{ await pool.query('ROLLBACK TO SAVEPOINT sp_online'); }catch{}
+    try{ await pool.query('COMMIT'); }catch{}
+    console.error('set_online failed', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 // driver: logout (revoke current token)
 app.post('/api/driver/logout', requireTelegram('driver'), async (req, res) => {
   try{
@@ -763,6 +814,11 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), requireDriverSessio
   if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
   if (driver.status !== 'approved') return res.json({ ok: true, rides: [], note: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.json({ ok: true, rides: [], note: 'balance_blocked' });
+
+  // If online/offline columns exist, show rides only when online
+  if (await driversHaveOnlineCols()){
+    if (!driver.is_online) return res.json({ ok:true, rides: [], offline:true });
+  }
 
   const q = await pool.query(`SELECT * FROM rides WHERE status='searching' ORDER BY id DESC LIMIT 10`);
   res.json({ ok: true, rides: q.rows });
@@ -928,53 +984,6 @@ app.post('/api/admin/driver_status', adminAuth, async (req, res) => {
   }
 
   res.json({ ok: true, driver: q.rows[0] || null, note: note || null });
-});
-
-
-// admin: delete driver fully (cascade). Best-effort removes uploaded docs files too.
-// Safety: disallow if driver has active rides (assigned/started) unless force=true.
-app.post('/api/admin/driver_delete', adminAuth, async (req, res) => {
-  const { driver_id, force } = req.body || {};
-  const id = Number(driver_id);
-  if (!Number.isFinite(id)) return res.status(400).json({ ok:false, error:'bad_driver_id' });
-
-  try{
-    const activeQ = await pool.query(
-      `SELECT COUNT(*)::int c FROM rides WHERE driver_id=$1 AND status IN ('assigned','started')`,
-      [id]
-    );
-    const active = activeQ.rows?.[0]?.c || 0;
-    if (active > 0 && !force) {
-      return res.status(400).json({ ok:false, error:'active_rides', active_rides: active });
-    }
-
-    // Collect document paths for best-effort cleanup
-    const docsQ = await pool.query(`SELECT file_path FROM driver_documents WHERE driver_id=$1`, [id]);
-    const docPaths = (docsQ.rows || []).map(r => r.file_path).filter(Boolean);
-
-    // Delete driver (cascades: documents, topups, sessions/credentials; rides keep but driver_id becomes NULL)
-    const delQ = await pool.query(`DELETE FROM drivers WHERE id=$1 RETURNING id`, [id]);
-    if (!delQ.rows[0]) return res.status(404).json({ ok:false, error:'not_found' });
-
-    // Best-effort remove files from disk (Render FS may be ephemeral)
-    if (docPaths.length) {
-      try{
-        const { default: fs } = await import('fs');
-        for (const pth of docPaths) {
-          try{
-            const rel = pth.startsWith('/') ? pth.slice(1) : pth; // e.g. uploads/xyz
-            const abs = path.join(__dirname, 'public', rel);
-            await fs.promises.unlink(abs);
-          }catch(e){}
-        }
-      }catch(e){}
-    }
-
-    return res.json({ ok:true });
-  }catch(e){
-    console.error('admin driver_delete failed', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
 });
 
 app.get('/api/admin/topups', adminAuth, async (req, res) => {
