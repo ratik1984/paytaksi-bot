@@ -227,7 +227,7 @@ async function loadRides(){
     (data.rides||[]).forEach((r)=>{
       const div = document.createElement('div');
       div.className='item';
-      const drv = r.driver_id ? `Sürücü: ${r.driver_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
+      const drv = r.driver_id ? `Sürücü: ${r.driver_first_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
       const canCancel = (r.status === 'searching' || r.status === 'assigned');
       const canViewChat = (r.driver_id && ['assigned','started','completed','cancelled'].includes(String(r.status)));
       const canSendChat = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
@@ -335,7 +335,7 @@ async function loadRides(){
             if (!text) return;
             bSend.disabled = true;
             try{
-              await api('/api/passenger/send_message',{method:'POST',body:{ride_id:Number(r.id), text}});
+              await api('/api/passenger/send_message',{method:'POST',body:{ride_id:Number(r.id), message:text}});
               input.value='';
               await refreshChat();
             }catch(e){
@@ -356,6 +356,16 @@ function escapeHtml(s){
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
+}
+
+function openTelegramUser(user){
+  const tg_id = user?.tg_id;
+  const username = user?.username;
+  const url = username ? `https://t.me/${encodeURIComponent(username)}` : `tg://user?id=${encodeURIComponent(String(tg_id||''))}`;
+  try{
+    if (Telegram?.WebApp?.openTelegramLink) Telegram.WebApp.openTelegramLink(url);
+    else window.open(url,'_blank');
+  }catch{ window.open(url,'_blank'); }
 }
 loadRides();
 setInterval(loadRides, 4000);

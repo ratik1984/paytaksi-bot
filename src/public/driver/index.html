@@ -107,6 +107,36 @@
 
   <!-- 3) Driver panels (visible only after login) -->
   <div class="hide" id="driverArea">
+    <!-- Active ride -->
+    <div class="card hide" id="cardActive">
+      <b>Aktiv sifariş</b>
+      <div class="muted" id="activeInfo">—</div>
+      <div class="row" style="margin-top:10px">
+        <div class="two">
+          <button id="btnRoute" type="button">🗺 Marşrut</button>
+          <button id="btnPickupMap" type="button">📍 Pick-up xəritə</button>
+        </div>
+        <div class="two">
+          <button id="btnCustomerChat" type="button">💬 Müştəri ilə əlaqə</button>
+          <button id="btnCustomerCall" type="button">📞 Zəng (Telegram)</button>
+        </div>
+        <div class="two">
+          <button id="btnStartRide" type="button">▶️ Başla</button>
+          <button id="btnCompleteRide" type="button">✅ Bitir</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:10px">
+        <b>Yazışma</b>
+        <div id="chatBox" style="max-height:260px;overflow:auto;margin-top:8px"></div>
+        <div class="two" style="margin-top:8px">
+          <input id="chatMsg" placeholder="Mesaj yazın…" />
+          <button id="btnSendChat" type="button">Göndər</button>
+        </div>
+        <div class="muted" id="chatStatus">—</div>
+      </div>
+    </div>
+
     <div class="card">
       <b>Açıq sifarişlər</b>
       <div class="muted">Balans -10 və ya aşağı olanda sifariş ala bilmirsiniz. Komissiya: 10%.</div>
@@ -133,6 +163,10 @@ const regStatus = document.getElementById('regStatus');
 const loginStatus = document.getElementById('loginStatus');
 const sessionStatus = document.getElementById('sessionStatus');
 const ridesEl = document.getElementById('rides');
+const cardActive = document.getElementById('cardActive');
+const activeInfo = document.getElementById('activeInfo');
+const chatBox = document.getElementById('chatBox');
+const chatStatus = document.getElementById('chatStatus');
 const topStatus = document.getElementById('topStatus');
 
 const u = tgUser();
@@ -211,10 +245,11 @@ async function refreshAfterLogin(){
   }catch(_){
     setOnlineUI(false);
   }
+  await loadActiveRide();
   await loadOpenRides();
   // auto refresh offers/open rides
   if (!window.__ridesTimer){
-    window.__ridesTimer = setInterval(()=>{ try{ loadOpenRides(); }catch(_){} }, 5000);
+    window.__ridesTimer = setInterval(()=>{ try{ loadActiveRide(); loadOpenRides(); }catch(_){} }, 5000);
   }
 }
 
@@ -335,6 +370,11 @@ document.getElementById('btnTop').onclick = async ()=>{
 
 async function loadOpenRides(){
   try{
+    // If driver has active ride, hide open rides list (focus mode)
+    if (!cardActive.classList.contains('hide')) {
+      ridesEl.innerHTML = '<div class="muted">Aktiv sifariş var. Yeni sifarişləri görmək üçün əvvəlcə bunu bitirin.</div>';
+      return;
+    }
     const data = await api('/api/driver/open_rides');
     ridesEl.innerHTML='';
     if (data.offline){
@@ -399,6 +439,120 @@ async function loadOpenRides(){
     }
   }
 }
+
+function tgUserLink(tg_id, username){
+  if (username) return `https://t.me/${encodeURIComponent(username)}`;
+  // tg://user?id=... works inside Telegram
+  return `tg://user?id=${encodeURIComponent(String(tg_id||''))}`;
+}
+
+function openTgLink(url){
+  try{
+    if (Telegram?.WebApp?.openTelegramLink) Telegram.WebApp.openTelegramLink(url);
+    else window.open(url,'_blank');
+  }catch{ window.open(url,'_blank'); }
+}
+
+let __activeRideId = null;
+let __activeRide = null;
+
+async function loadActiveRide(){
+  try{
+    const data = await api('/api/driver/active_ride');
+    const r = data.ride;
+    __activeRide = r;
+    __activeRideId = r?.id || null;
+    show(cardActive, !!r);
+    if (!r) return;
+
+    const passName = (r.passenger_first_name || 'Müştəri') + (r.passenger_username ? ` (@${r.passenger_username})` : '');
+    activeInfo.innerHTML = `<b>#${r.id}</b> • <b>${r.status}</b><br>`+
+      `${r.pickup_text||''} → ${r.drop_text||''}<br>`+
+      `Məsafə: <b>${Number(r.distance_km).toFixed(2)} km</b> • Qiymət: <b>${Number(r.fare).toFixed(2)} AZN</b><br>`+
+      `Müştəri: <b>${passName}</b>`;
+
+    // Buttons
+    const origin = `${r.pickup_lat},${r.pickup_lon}`;
+    const dest = `${r.drop_lat},${r.drop_lon}`;
+    document.getElementById('btnRoute').onclick = ()=>{
+      const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(dest)}`;
+      openTgLink(url);
+    };
+    document.getElementById('btnPickupMap').onclick = ()=>{
+      const url = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(r.pickup_lat)}&mlon=${encodeURIComponent(r.pickup_lon)}#map=16/${encodeURIComponent(r.pickup_lat)}/${encodeURIComponent(r.pickup_lon)}`;
+      openTgLink(url);
+    };
+    document.getElementById('btnCustomerChat').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
+    document.getElementById('btnCustomerCall').onclick = ()=> openTgLink(tgUserLink(r.passenger_tg_id, r.passenger_username));
+
+    document.getElementById('btnStartRide').onclick = async ()=>{
+      try{
+        await api('/api/driver/start',{method:'POST',body:{ride_id:r.id}});
+        await loadActiveRide();
+      }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+    };
+    document.getElementById('btnCompleteRide').onclick = async ()=>{
+      if (!confirm('Sifarişi bitirmək?')) return;
+      try{
+        const j = await api('/api/driver/complete',{method:'POST',body:{ride_id:r.id}});
+        alert(`Bitdi ✅ Komissiya: ${j.commission} AZN. Yeni balans: ${j.new_balance} AZN`);
+        await loadActiveRide();
+        await loadOpenRides();
+      }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+    };
+
+    await loadChat();
+  }catch(e){
+    // ignore
+  }
+}
+
+function renderChat(messages){
+  chatBox.innerHTML='';
+  (messages||[]).forEach((m)=>{
+    const div = document.createElement('div');
+    div.style.margin = '6px 0';
+    div.style.padding = '8px 10px';
+    div.style.borderRadius = '12px';
+    div.style.border = '1px solid #e6e6e6';
+    div.style.background = (m.sender_role === 'driver') ? '#f7f7f7' : '#fff';
+    div.innerHTML = `<b>${m.sender_role === 'driver' ? 'Siz' : 'Müştəri'}</b> <span class="muted">${new Date(m.created_at).toLocaleString()}</span><br>${escapeHtml(m.message)}`;
+    chatBox.appendChild(div);
+  });
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function escapeHtml(str){
+  return String(str||'')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;');
+}
+
+async function loadChat(){
+  if (!__activeRideId) return;
+  try{
+    const j = await api(`/api/driver/ride_messages?ride_id=${encodeURIComponent(__activeRideId)}`);
+    renderChat(j.messages);
+    setStatus(chatStatus,'Yazışma hazır ✅');
+  }catch(e){
+    setStatus(chatStatus,'Chat xətası: '+(e.data?.error||e.message), false);
+  }
+}
+
+document.getElementById('btnSendChat').onclick = async ()=>{
+  if (!__activeRideId) return;
+  const inp = document.getElementById('chatMsg');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  try{
+    inp.value='';
+    await api('/api/driver/send_message',{method:'POST',body:{ride_id:__activeRideId,message:msg}});
+    await loadChat();
+  }catch(e){
+    setStatus(chatStatus,'Göndərmə xətası: '+(e.data?.error||e.message), false);
+  }
+};
 
 (async ()=>{
   await loadMe();
