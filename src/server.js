@@ -103,6 +103,24 @@ function calcFare(distanceKm) {
   return money2(BASE_FARE + extra);
 }
 
+// ---- DB helpers
+// Some installations may have an older `rides` table without the new cancel metadata columns.
+// We keep cancellation working even if the SQL patch wasn't applied yet.
+const _ridesColsCache = { ts: 0, cols: null };
+async function getRidesColumns() {
+  const now = Date.now();
+  if (_ridesColsCache.cols && now - _ridesColsCache.ts < 60_000) return _ridesColsCache.cols;
+  const q = await pool.query(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema='public' AND table_name='rides'`
+  );
+  const cols = new Set((q.rows || []).map((r) => r.column_name));
+  _ridesColsCache.ts = now;
+  _ridesColsCache.cols = cols;
+  return cols;
+}
+
 async function ensureSchema() {
   const { default: fs } = await import('fs');
   const schema = fs.readFileSync(path.resolve('db/schema.sql'), 'utf8');
@@ -524,13 +542,24 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
         return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
       }
 
-      const upd = await client.query(
-        `UPDATE rides
-         SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
-         WHERE id=$1
-         RETURNING *`,
-        [ride_id, reason]
-      );
+      // Backward-compatible UPDATE: if cancel metadata columns don't exist, update only `status` + `updated_at`.
+      const cols = await getRidesColumns();
+      const hasMeta = cols.has('cancelled_at') && cols.has('cancelled_by') && cols.has('cancelled_reason');
+      const upd = hasMeta
+        ? await client.query(
+            `UPDATE rides
+             SET status='cancelled', updated_at=NOW(), cancelled_at=NOW(), cancelled_by='passenger', cancelled_reason=$2
+             WHERE id=$1
+             RETURNING *`,
+            [ride_id, reason]
+          )
+        : await client.query(
+            `UPDATE rides
+             SET status='cancelled', updated_at=NOW()
+             WHERE id=$1
+             RETURNING *`,
+            [ride_id]
+          );
       ride = { ...ride, ...upd.rows[0] };
       await client.query('COMMIT');
       client.release();
