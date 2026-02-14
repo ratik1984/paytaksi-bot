@@ -225,12 +225,38 @@ function requireTelegram(role) {
 // DB tables required: driver_credentials, driver_sessions (see SQL patch)
 const DRIVER_SESSION_DAYS = Number(process.env.DRIVER_SESSION_DAYS || 30);
 
+// Some deployments forget to apply the SQL patch for driver auth tables.
+// To avoid breaking registration/login, we lazily ensure these tables exist.
+async function ensureDriverAuthTables(){
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS driver_credentials (
+      driver_id INTEGER PRIMARY KEY REFERENCES drivers(id) ON DELETE CASCADE,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS driver_sessions (
+      id SERIAL PRIMARY KEY,
+      driver_id INTEGER NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_driver_sessions_driver_id ON driver_sessions(driver_id);
+    CREATE INDEX IF NOT EXISTS idx_driver_sessions_token ON driver_sessions(token);
+  `);
+}
+
 function getDriverToken(req){
   return String(req.headers['x-driver-token'] || '').trim();
 }
 
 async function requireDriverSession(req, res, next){
   try{
+    await ensureDriverAuthTables();
     const token = getDriverToken(req);
     if (!token) return res.status(401).json({ ok:false, error:'need_login' });
 
@@ -257,6 +283,7 @@ async function requireDriverSession(req, res, next){
 }
 
 async function createDriverSession(driver_id){
+  await ensureDriverAuthTables();
   const token = crypto.randomBytes(24).toString('hex');
   const q = await pool.query(
     `INSERT INTO driver_sessions (driver_id, token, expires_at)
@@ -576,40 +603,68 @@ app.post(
     { name: 'tp_back', maxCount: 1 }
   ]),
   async (req, res) => {
-    const body = req.body || {};
-    const car_year = Number(body.car_year);
-    const car_color = String(body.car_color || '').trim();
-    const allowedColors = new Set(['ağ','qara','qırmızı','boz','mavi','sarı','yaşıl']);
+    // Important: even if some part fails (docs insert, notification etc.),
+    // we should still return a JSON response and not break the UX.
+    try{
+      const body = req.body || {};
+      const car_year = Number(body.car_year);
+      const car_color = String(body.car_color || '').trim();
+      const allowedColors = new Set(['ağ','qara','qırmızı','boz','mavi','sarı','yaşıl']);
 
-    if (!Number.isFinite(car_year) || car_year < 2010) return res.status(400).json({ ok: false, error: 'car_year_min_2010' });
-    if (!allowedColors.has(car_color)) return res.status(400).json({ ok: false, error: 'bad_color' });
+      if (!Number.isFinite(car_year) || car_year < 2010) return res.status(400).json({ ok: false, error: 'car_year_min_2010' });
+      if (!allowedColors.has(car_color)) return res.status(400).json({ ok: false, error: 'bad_color' });
 
-    const user = await upsertUser(req.tgUser, 'driver');
+      const user = await upsertUser(req.tgUser, 'driver');
 
-    // create driver row
-    const drvQ = await pool.query(
-      `INSERT INTO drivers (user_id, phone, car_make, car_model, car_year, car_color, plate)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT (user_id) DO UPDATE SET phone=EXCLUDED.phone, car_make=EXCLUDED.car_make, car_model=EXCLUDED.car_model, car_year=EXCLUDED.car_year, car_color=EXCLUDED.car_color, plate=EXCLUDED.plate
-       RETURNING *`,
-      [user.id, body.phone || null, body.car_make || null, body.car_model || null, car_year, car_color, body.plate || null]
-    );
-    const driver = drvQ.rows[0];
-
-    const files = req.files || {};
-    const expected = ['id_front','id_back','dl_front','dl_back','tp_front','tp_back'];
-    for (const t of expected) {
-      const f = files[t]?.[0];
-      if (!f) continue;
-      await pool.query(
-        `INSERT INTO driver_documents (driver_id, doc_type, file_path)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (driver_id, doc_type) DO UPDATE SET file_path=EXCLUDED.file_path, uploaded_at=NOW()`,
-        [driver.id, t, `/uploads/${path.basename(f.path)}`]
+      // create/update driver row
+      const drvQ = await pool.query(
+        `INSERT INTO drivers (user_id, phone, car_make, car_model, car_year, car_color, plate)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (user_id) DO UPDATE SET phone=EXCLUDED.phone, car_make=EXCLUDED.car_make, car_model=EXCLUDED.car_model, car_year=EXCLUDED.car_year, car_color=EXCLUDED.car_color, plate=EXCLUDED.plate
+         RETURNING *`,
+        [user.id, body.phone || null, body.car_make || null, body.car_model || null, car_year, car_color, body.plate || null]
       );
-    }
+      const driver = drvQ.rows[0];
 
-    res.json({ ok: true, driver });
+      // documents are best-effort
+      try{
+        const files = req.files || {};
+        const expected = ['id_front','id_back','dl_front','dl_back','tp_front','tp_back'];
+        for (const t of expected) {
+          const f = files[t]?.[0];
+          if (!f) continue;
+          await pool.query(
+            `INSERT INTO driver_documents (driver_id, doc_type, file_path)
+             VALUES ($1,$2,$3)
+             ON CONFLICT (driver_id, doc_type) DO UPDATE SET file_path=EXCLUDED.file_path, uploaded_at=NOW()`,
+            [driver.id, t, `/uploads/${path.basename(f.path)}`]
+          );
+        }
+      }catch(docErr){
+        console.error('driver docs insert failed (non-fatal):', docErr);
+      }
+
+      // notify driver that the registration was received (non-fatal)
+      if (driverBot) {
+        try{
+          const pt = signPtToken(req.tgUser.id, 'driver');
+          const url = `${APP_BASE_URL}/app/driver/?pt=${encodeURIComponent(pt)}`;
+          await driverBot.telegram.sendMessage(Number(req.tgUser.id),
+            `✅ Qeydiyyat qəbul olundu.\nStatus: pending (admin təsdiqi gözlənilir).\n\nSürücü panelinə daxil olun:`,
+            {
+              ...webAppButton('🚖 Sürücü paneli', url),
+              disable_web_page_preview: true,
+              disable_notification: false
+            }
+          );
+        }catch(notifyErr){}
+      }
+
+      return res.json({ ok: true, driver });
+    }catch(e){
+      console.error('driver register failed:', e);
+      return res.status(500).json({ ok:false, error:'server_error' });
+    }
   }
 );
 
@@ -628,6 +683,7 @@ app.get('/api/driver/me', requireTelegram('driver'), async (req, res) => {
 // driver: set password (after registration)
 app.post('/api/driver/set_password', requireTelegram('driver'), async (req, res) => {
   try{
+    await ensureDriverAuthTables();
     const { password } = req.body || {};
     if (!password || String(password).length < 4) return res.status(400).json({ ok:false, error:'pass_too_short' });
 
@@ -653,6 +709,7 @@ app.post('/api/driver/set_password', requireTelegram('driver'), async (req, res)
 // driver: login -> returns session token
 app.post('/api/driver/login', requireTelegram('driver'), async (req, res) => {
   try{
+    await ensureDriverAuthTables();
     const { phone, password } = req.body || {};
     if (!password) return res.status(400).json({ ok:false, error:'missing_password' });
 

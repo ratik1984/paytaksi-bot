@@ -187,15 +187,24 @@ document.getElementById('btnReg').onclick = async ()=>{
     if (!tgInitData() && ptToken()) headers['X-Pt-Token'] = ptToken();
 
     const res = await fetch('/api/driver/register', { method:'POST', headers, body: fd });
-    const data = await res.json();
-    if (!res.ok) throw { data };
+	let data = null;
+	try{ data = await res.json(); }catch(_){ data = { ok:false, error:`http_${res.status}` }; }
+	if (!res.ok) throw { data };
 
-    // set password if provided
-    if (pass){
-      await api('/api/driver/set_password', { method:'POST', body:{ password: pass }});
-    }
+	// set password if provided (non-fatal)
+	let passSaved = true;
+	if (pass){
+	  try{
+	    await api('/api/driver/set_password', { method:'POST', body:{ password: pass }});
+	  }catch(e){
+	    passSaved = false;
+	  }
+	}
 
-    setStatus(regStatus,'Göndərildi ✅. İndi Login edin. (Admin təsdiqi gözlənilir.)');
+	setStatus(regStatus, passSaved
+	  ? 'Göndərildi ✅. İndi Login edin. (Admin təsdiqi gözlənilir.)'
+	  : 'Göndərildi ✅. Amma şifrə saxlanmadı (DB patch lazım ola bilər). Yenə də Login ekranına keçin.'
+	);
     await loadMe();
   }catch(e){
     const code = e.data?.error || e.data?.reason || 'http';
