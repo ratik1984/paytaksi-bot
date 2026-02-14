@@ -571,7 +571,8 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
       const d = dQ.rows?.[0];
       if (d?.driver_tg_id) {
         const msg = `❌ Sifariş ləğv edildi (#${ride_id}).\n\n📍 ${ride.pickup_text || ''}\n➡️ ${ride.drop_text || ''}${reason ? `\n\nSəbəb: ${reason}` : ''}`;
-        await sendTelegram('driver', d.driver_tg_id, msg);
+        // Explicitly keep notifications enabled (sound if user hasn't muted the chat)
+        await sendTelegram('driver', d.driver_tg_id, msg, { disable_notification: false });
       }
     }
 
@@ -671,6 +672,25 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), async (req, res) =>
 
   const q = await pool.query(`SELECT * FROM rides WHERE status='searching' ORDER BY id DESC LIMIT 10`);
   res.json({ ok: true, rides: q.rows });
+});
+
+// driver: active (assigned/started/cancelled) ride for quick status view in the webapp
+app.get('/api/driver/active_ride', requireTelegram('driver'), async (req, res) => {
+  const user = await upsertUser(req.tgUser, 'driver');
+  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
+  const driver = dQ.rows[0];
+  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
+
+  // Show latest relevant ride (even if cancelled) so driver can see the cancellation message in-app
+  const rQ = await pool.query(
+    `SELECT *
+     FROM rides
+     WHERE driver_id=$1 AND status IN ('assigned','started','cancelled')
+     ORDER BY id DESC
+     LIMIT 1`,
+    [driver.id]
+  );
+  res.json({ ok: true, ride: rQ.rows[0] || null });
 });
 
 // driver: accept ride

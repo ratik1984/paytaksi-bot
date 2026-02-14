@@ -17,6 +17,14 @@
     .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
     .btnSmall{padding:8px 10px;border-radius:10px;border:0;background:#b00020;color:#fff;font-size:14px;width:auto}
     .actions{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+    /* Cancel reason modal */
+    .modalBack{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:16px;z-index:9999}
+    .modal{background:#fff;border-radius:16px;max-width:520px;width:100%;padding:14px;border:1px solid #e6e6e6}
+    .modal h3{margin:6px 0 10px 0;font-size:18px}
+    .modal .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .modal textarea{width:100%;min-height:72px;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:15px;resize:vertical}
+    .btnGhost{background:#eee;color:#111}
   </style>
 </head>
 <body>
@@ -42,6 +50,30 @@
   <div class="card">
     <b>Son sifarişlər</b>
     <div class="list" id="rides"></div>
+  </div>
+
+  <!-- Cancel reason modal -->
+  <div class="modalBack" id="cancelBack">
+    <div class="modal">
+      <h3>❌ Sifarişi ləğv et</h3>
+      <div class="muted" id="cancelInfo">—</div>
+      <div class="row" style="margin-top:10px">
+        <select id="cancelReason">
+          <option value="">Səbəb seçin</option>
+          <option>Sürücü gecikir</option>
+          <option>Fikrim dəyişdi</option>
+          <option>Yanlış ünvan seçdim</option>
+          <option>Qiymət uyğun deyil</option>
+          <option>Digər…</option>
+        </select>
+        <textarea id="cancelNote" placeholder="Digər səbəb (istəyə bağlı)" style="display:none"></textarea>
+        <div class="two">
+          <button id="cancelNo" class="btnGhost">Geri</button>
+          <button id="cancelYes" class="btnSmall" style="width:100%">Ləğv et</button>
+        </div>
+        <div class="muted">Ləğv etdikdə (əgər sürücü təyin olunubsa) sürücüyə bildiriş gedəcək.</div>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -207,10 +239,11 @@ async function loadRides(){
       if (canCancel){
         const btn = div.querySelector('[data-cancel]');
         btn.onclick = async ()=>{
-          if (!confirm(`#${r.id} sifarişi ləğv edilsin?`)) return;
+          const reason = await openCancelModal(r);
+          if (reason === null) return;
           try{
             btn.disabled = true;
-            await api('/api/passenger/cancel_ride',{method:'POST',body:{ride_id: Number(r.id)}});
+            await api('/api/passenger/cancel_ride',{method:'POST',body:{ride_id: Number(r.id), reason}});
             setStatus(statusEl,`Sifariş #${r.id} ləğv edildi ✅`);
             await loadRides();
           }catch(e){
@@ -224,6 +257,49 @@ async function loadRides(){
 }
 loadRides();
 setInterval(loadRides, 4000);
+
+// ---- Cancel modal helpers
+const cancelBack = document.getElementById('cancelBack');
+const cancelInfo = document.getElementById('cancelInfo');
+const cancelReason = document.getElementById('cancelReason');
+const cancelNote = document.getElementById('cancelNote');
+const cancelNo = document.getElementById('cancelNo');
+const cancelYes = document.getElementById('cancelYes');
+
+cancelReason.addEventListener('change', ()=>{
+  const v = String(cancelReason.value||'');
+  cancelNote.style.display = (v && v.startsWith('Digər')) ? '' : 'none';
+});
+
+function openCancelModal(ride){
+  return new Promise((resolve)=>{
+    cancelInfo.innerHTML = `<b>#${ride.id}</b> • ${ride.pickup_text||''} → ${ride.drop_text||''}`;
+    cancelReason.value = '';
+    cancelNote.value = '';
+    cancelNote.style.display = 'none';
+    cancelBack.style.display = 'flex';
+
+    const close = (val)=>{
+      cancelBack.style.display = 'none';
+      cancelNo.onclick = null;
+      cancelYes.onclick = null;
+      resolve(val);
+    };
+
+    cancelNo.onclick = ()=> close(null);
+    cancelBack.onclick = (e)=>{ if (e.target === cancelBack) close(null); };
+    cancelYes.onclick = ()=>{
+      const sel = String(cancelReason.value||'').trim();
+      if (!sel) { alert('Səbəb seçin.'); return; }
+      let text = sel;
+      if (sel.startsWith('Digər')) {
+        const note = String(cancelNote.value||'').trim();
+        if (note) text = note;
+      }
+      close(text.slice(0,200));
+    };
+  });
+}
 </script>
 </body>
 </html>

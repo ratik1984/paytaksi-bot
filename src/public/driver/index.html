@@ -15,6 +15,7 @@
     .muted{color:#666;font-size:13px}
     .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   </style>
 </head>
 <body>
@@ -24,6 +25,11 @@
   <div class="card">
     <b>Hesab</b>
     <div class="muted" id="acc">—</div>
+  </div>
+
+  <div class="card">
+    <b>Aktiv sifariş</b>
+    <div class="muted" id="active">Yüklənir…</div>
   </div>
 
   <div class="card">
@@ -80,6 +86,7 @@ const who = document.getElementById('who');
 const accEl = document.getElementById('acc');
 const regStatus = document.getElementById('regStatus');
 const ridesEl = document.getElementById('rides');
+const activeEl = document.getElementById('active');
 const topStatus = document.getElementById('topStatus');
 
 const u = tgUser();
@@ -164,9 +171,49 @@ async function loadOpenRides(){
   }catch(e){}
 }
 
+async function loadActiveRide(){
+  try{
+    const data = await api('/api/driver/active_ride');
+    const r = data.ride;
+    if (!r){ activeEl.innerHTML = '<span class="muted">Aktiv sifariş yoxdur.</span>'; return; }
+
+    const status = String(r.status||'');
+    const isCancelled = status === 'cancelled';
+    const reason = r.cancelled_reason ? `<div class="muted"><b>Səbəb:</b> ${r.cancelled_reason}</div>` : '';
+
+    activeEl.innerHTML = `
+      <div class="item" style="border-color:${isCancelled ? '#b00020' : '#ddd'}">
+        <b>#${r.id}</b> • ${status}${isCancelled ? ' ❌' : ''}<br>
+        ${r.pickup_text||''} → ${r.drop_text||''}<br>
+        Məsafə: ${Number(r.distance_km||0).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN
+        ${reason}
+        <div class="actions" style="margin-top:10px">
+          ${status==='assigned' ? `<button id="btnStart">🚖 Start</button>` : ''}
+          ${status==='started' ? `<button id="btnComplete">✅ Complete</button>` : ''}
+        </div>
+        ${isCancelled ? '<div class="muted" style="color:#b00020;margin-top:8px">Bu sifariş sərnişin tərəfindən ləğv edilib.</div>' : ''}
+      </div>
+    `;
+
+    const bStart = document.getElementById('btnStart');
+    if (bStart) bStart.onclick = async ()=>{
+      try{ await api('/api/driver/start',{method:'POST',body:{ride_id:r.id}}); await loadActiveRide(); await loadMe(); }
+      catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+    };
+    const bComp = document.getElementById('btnComplete');
+    if (bComp) bComp.onclick = async ()=>{
+      try{ await api('/api/driver/complete',{method:'POST',body:{ride_id:r.id}}); await loadActiveRide(); await loadMe(); }
+      catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+    };
+  }catch(e){
+    activeEl.textContent = 'Xəta: '+(e.data?.error||e.data?.reason||e.message);
+  }
+}
+
 loadMe();
 loadOpenRides();
-setInterval(()=>{loadMe();loadOpenRides();}, 5000);
+loadActiveRide();
+setInterval(()=>{loadMe();loadOpenRides();loadActiveRide();}, 5000);
 </script>
 </body>
 </html>
