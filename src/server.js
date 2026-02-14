@@ -460,6 +460,15 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 
   const passenger = await upsertUser(req.tgUser, 'passenger');
 
+  // Only one active ride per passenger (must cancel/finish previous one first)
+  const activeQ = await pool.query(
+    "SELECT id, status FROM rides WHERE passenger_user_id=$1 AND status IN ('searching','assigned','started') ORDER BY id DESC LIMIT 1",
+    [passenger.id]
+  );
+  if (activeQ.rows.length) {
+    return res.status(409).json({ ok: false, error: 'active_ride_exists', ride: activeQ.rows[0] });
+  }
+
   const dist = haversineKm(pickup_lat, pickup_lon, drop_lat, drop_lon);
   const fare = calcFare(dist);
   const commission = money2(fare * COMMISSION_RATE);
@@ -477,21 +486,35 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
   try {
-    const passenger_tg_id = String(req.tgUser.id);
+    const passenger = await upsertUser(req.tgUser, 'passenger');
     const ride_id = Number(req.body.ride_id);
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
-    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    const rideQ = await pool.query(
+      "SELECT id, status, driver_id FROM rides WHERE id=$1 AND passenger_user_id=$2",
+      [ride_id, passenger.id]
+    );
+    if (rideQ.rows.length === 0) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    const ride = rideQ.rows[0];
 
-    if (!['searching','assigned'].includes(ride.status)) {
+    if (!['searching', 'assigned'].includes(ride.status)) {
       return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
     }
 
-    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+    await pool.query(
+      "UPDATE rides SET status='cancelled', updated_at=NOW() WHERE id=$1 AND passenger_user_id=$2",
+      [ride_id, passenger.id]
+    );
 
-    if (ride.driver_tg_id) {
-      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
+    // Notify driver if assigned
+    if (ride.driver_id) {
+      const d = await pool.query(
+        "SELECT u.tg_id FROM drivers d JOIN users u ON u.id=d.user_id WHERE d.id=$1",
+        [ride.driver_id]
+      );
+      if (d.rows[0]?.tg_id) {
+        try { await sendTelegramToRole('driver', String(d.rows[0].tg_id), `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
+      }
     }
 
     return res.json({ ok: true });
