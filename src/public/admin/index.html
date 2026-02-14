@@ -141,14 +141,32 @@ async function refresh(){
           <button data-s="rejected">Rədd et</button>
           <button data-s="blocked">Blokla</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="btnDelete" style="background:#b00020">🗑 Tam sil</button>
+        </div>
       `;
-      div.querySelectorAll('button').forEach(btn=>{
+      div.querySelectorAll('button[data-s]').forEach(btn=>{
         btn.onclick = async ()=>{
           const status = btn.getAttribute('data-s');
           await adminApi('/api/admin/driver_status',{method:'POST', body:{driver_id:x.id, status}});
           refresh();
         };
       });
+      const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
       box.appendChild(div);
     });
     if (!(d.drivers||[]).length) box.innerHTML='<div class="muted">Sürücü yoxdur.</div>';
@@ -171,13 +189,28 @@ async function refresh(){
           <button data-a="reject">Reject</button>
         </div>
       `;
-      div.querySelectorAll('button').forEach(btn=>{
+      div.querySelectorAll('button[data-s]').forEach(btn=>{
         btn.onclick = async ()=>{
           const action = btn.getAttribute('data-a');
           await adminApi('/api/admin/topup_review',{method:'POST', body:{ topup_id:x.id, action }});
           refresh();
         };
       });
+      const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
       box.appendChild(div);
     });
     if (!(t.topups||[]).length) box.innerHTML='<div class="muted">Sorğu yoxdur.</div>';
@@ -197,6 +230,21 @@ async function refresh(){
         ${x.pickup_text||''} → ${x.drop_text||''}<br>
         ${Number(x.distance_km).toFixed(2)} km • ${x.fare} AZN • Komissiya: ${x.commission} AZN
       `;
+      const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
       box.appendChild(div);
     });
   }catch(e){}
@@ -215,7 +263,22 @@ async function refresh(){
         const div = document.createElement('div');
         div.className='item';
         div.innerHTML = `<b>${idx+1}.</b> ${it.reason} <span class="muted">• ${it.c}</span>`;
-        box.appendChild(div);
+        const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
+      box.appendChild(div);
       });
     }
   }catch(e){}

@@ -930,6 +930,53 @@ app.post('/api/admin/driver_status', adminAuth, async (req, res) => {
   res.json({ ok: true, driver: q.rows[0] || null, note: note || null });
 });
 
+
+// admin: delete driver fully (cascade). Best-effort removes uploaded docs files too.
+// Safety: disallow if driver has active rides (assigned/started) unless force=true.
+app.post('/api/admin/driver_delete', adminAuth, async (req, res) => {
+  const { driver_id, force } = req.body || {};
+  const id = Number(driver_id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok:false, error:'bad_driver_id' });
+
+  try{
+    const activeQ = await pool.query(
+      `SELECT COUNT(*)::int c FROM rides WHERE driver_id=$1 AND status IN ('assigned','started')`,
+      [id]
+    );
+    const active = activeQ.rows?.[0]?.c || 0;
+    if (active > 0 && !force) {
+      return res.status(400).json({ ok:false, error:'active_rides', active_rides: active });
+    }
+
+    // Collect document paths for best-effort cleanup
+    const docsQ = await pool.query(`SELECT file_path FROM driver_documents WHERE driver_id=$1`, [id]);
+    const docPaths = (docsQ.rows || []).map(r => r.file_path).filter(Boolean);
+
+    // Delete driver (cascades: documents, topups, sessions/credentials; rides keep but driver_id becomes NULL)
+    const delQ = await pool.query(`DELETE FROM drivers WHERE id=$1 RETURNING id`, [id]);
+    if (!delQ.rows[0]) return res.status(404).json({ ok:false, error:'not_found' });
+
+    // Best-effort remove files from disk (Render FS may be ephemeral)
+    if (docPaths.length) {
+      try{
+        const { default: fs } = await import('fs');
+        for (const pth of docPaths) {
+          try{
+            const rel = pth.startsWith('/') ? pth.slice(1) : pth; // e.g. uploads/xyz
+            const abs = path.join(__dirname, 'public', rel);
+            await fs.promises.unlink(abs);
+          }catch(e){}
+        }
+      }catch(e){}
+    }
+
+    return res.json({ ok:true });
+  }catch(e){
+    console.error('admin driver_delete failed', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 app.get('/api/admin/topups', adminAuth, async (req, res) => {
   const q = await pool.query(
     `SELECT t.*, d.user_id, u.tg_id, u.first_name, u.username
