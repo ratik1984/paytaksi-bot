@@ -181,12 +181,32 @@ async function loadActiveRide(){
     const isCancelled = status === 'cancelled';
     const reason = r.cancelled_reason ? `<div class="muted"><b>Səbəb:</b> ${r.cancelled_reason}</div>` : '';
 
+    const canChat = (status==='assigned' || status==='started');
+    const passengerName = r.passenger_first_name || '';
+    const passengerUsername = r.passenger_username || '';
+    const passengerTgId = r.passenger_tg_id;
+
     activeEl.innerHTML = `
       <div class="item" style="border-color:${isCancelled ? '#b00020' : '#ddd'}">
         <b>#${r.id}</b> • ${status}${isCancelled ? ' ❌' : ''}<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km||0).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN
         ${reason}
+        ${passengerTgId ? `<div class="muted" style="margin-top:6px">Sərnişin: <b>${passengerName}</b> (@${passengerUsername||'-'})</div>` : ''}
+        ${(canChat && passengerTgId) ? `
+          <div class="actions" style="margin-top:10px">
+            <button id="btnChat">💬 Yazışma</button>
+            <button id="btnCall">📞 Sərnişinə zəng</button>
+          </div>
+          <div id="chatBox" class="card" style="display:none;margin-top:8px;border-radius:12px;padding:10px">
+            <div class="muted" style="margin-bottom:6px">Yazışma yalnız aktiv sifarişdə mümkündür.</div>
+            <div id="msgList" style="max-height:220px;overflow:auto;border:1px dashed #ddd;border-radius:12px;padding:8px"></div>
+            <div class="row" style="margin-top:8px">
+              <input id="msgText" placeholder="Mesaj yaz…" />
+              <button id="btnSend">Göndər</button>
+            </div>
+          </div>
+        ` : ''}
         <div class="actions" style="margin-top:10px">
           ${status==='assigned' ? `<button id="btnStart">🚖 Start</button>` : ''}
           ${status==='started' ? `<button id="btnComplete">✅ Complete</button>` : ''}
@@ -205,9 +225,78 @@ async function loadActiveRide(){
       try{ await api('/api/driver/complete',{method:'POST',body:{ride_id:r.id}}); await loadActiveRide(); await loadMe(); }
       catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
     };
+
+    // Chat + call
+    const bCall = document.getElementById('btnCall');
+    if (bCall) bCall.onclick = ()=> openTelegramUser({ tg_id: passengerTgId, username: passengerUsername });
+
+    const bChat = document.getElementById('btnChat');
+    const chatBox = document.getElementById('chatBox');
+    const msgList = document.getElementById('msgList');
+    const msgText = document.getElementById('msgText');
+    const bSend = document.getElementById('btnSend');
+
+    let chatTimer = null;
+    let lastRendered = 0;
+
+    async function refreshChat(){
+      try{
+        const data2 = await api('/api/driver/ride_messages?ride_id='+encodeURIComponent(r.id));
+        const msgs = data2.messages || [];
+        if (!msgs.length){ msgList.innerHTML = '<div class="muted">Hələ mesaj yoxdur.</div>'; return; }
+        const lastId = msgs[msgs.length-1].id || 0;
+        if (lastId === lastRendered) return;
+        lastRendered = lastId;
+        msgList.innerHTML='';
+        msgs.forEach((m)=>{
+          const mine = m.sender_role === 'driver';
+          const divm = document.createElement('div');
+          divm.style.margin='6px 0';
+          divm.style.textAlign = mine ? 'right' : 'left';
+          divm.innerHTML = `<span style="display:inline-block;max-width:88%;padding:8px 10px;border-radius:12px;border:1px solid #e6e6e6;${mine?'background:#111;color:#fff;border-color:#111':''}">${escapeHtml(m.message)}</span>`;
+          msgList.appendChild(divm);
+        });
+        msgList.scrollTop = msgList.scrollHeight;
+      }catch(e){}
+    }
+
+    if (bChat && chatBox) bChat.onclick = async ()=>{
+      const open = chatBox.style.display !== 'none';
+      if (open){
+        chatBox.style.display='none';
+        bChat.textContent='💬 Yazışma';
+        if (chatTimer){ clearInterval(chatTimer); chatTimer=null; }
+        return;
+      }
+      chatBox.style.display='';
+      bChat.textContent='✖ Bağla';
+      await refreshChat();
+      chatTimer = setInterval(refreshChat, 3000);
+    };
+
+    if (bSend) bSend.onclick = async ()=>{
+      const text = String(msgText.value||'').trim();
+      if (!text) return;
+      bSend.disabled=true;
+      try{
+        await api('/api/driver/send_message',{method:'POST',body:{ride_id:Number(r.id), text}});
+        msgText.value='';
+        await refreshChat();
+      }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      finally{ bSend.disabled=false; }
+    };
   }catch(e){
     activeEl.textContent = 'Xəta: '+(e.data?.error||e.data?.reason||e.message);
   }
+}
+
+function escapeHtml(s){
+  return String(s||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 loadMe();

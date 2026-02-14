@@ -29,3 +29,28 @@ async function api(path, {method='GET', body=null, headers={}}={}){
   if (!res.ok) throw Object.assign(new Error(data.error||'http_error'), { status: res.status, data });
   return data;
 }
+
+// ---- Telegram helpers
+function openTelegramUser({ tg_id, username }) {
+  const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  // Prefer username link (more widely supported)
+  if (username) {
+    const url = `https://t.me/${String(username).replace(/^@/, '')}`;
+    try {
+      if (tg && tg.openTelegramLink) return tg.openTelegramLink(url);
+      if (tg && tg.openLink) return tg.openLink(url);
+    } catch {}
+    window.open(url, '_blank');
+    return;
+  }
+
+  // Fallback to tg://user?id=...
+  if (tg_id) {
+    const deep = `tg://user?id=${encodeURIComponent(String(tg_id))}`;
+    try {
+      if (tg && tg.openTelegramLink) return tg.openTelegramLink(deep);
+      if (tg && tg.openLink) return tg.openLink(deep);
+    } catch {}
+    window.location.href = deep;
+  }
+}
