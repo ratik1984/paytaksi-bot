@@ -523,6 +523,8 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
       }
 
       // Backward compatible update: if cancel columns are not present, fall back to status only.
+      // NOTE: In Postgres, any error inside a transaction aborts it; use SAVEPOINT to recover.
+      await client.query('SAVEPOINT cancel_cols');
       try {
         const upd = await client.query(
           `UPDATE rides
@@ -535,6 +537,7 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
       } catch (e2) {
         // 42703 = undefined_column
         if (e2 && e2.code === '42703') {
+          await client.query('ROLLBACK TO SAVEPOINT cancel_cols');
           const upd = await client.query(
             `UPDATE rides
              SET status='cancelled', updated_at=NOW()
