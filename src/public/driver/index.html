@@ -1065,16 +1065,107 @@ async function loadOpenRides(){
       }
     }
 
-    socket.on("new-order", (order) => {
-      // Minimal Bolt-like popup (non-breaking)
-      try {
-        const msg = "🚕 Yeni sifariş gəldi!\n\n" +
-          (order && order.pickup ? ("📍 Götürmə: " + order.pickup + "\n") : "") +
-          (order && order.dropoff ? ("🏁 Çatdırma: " + order.dropoff + "\n") : "") +
-          (order && order.price ? ("💰 Qiymət: " + order.price + " AZN\n") : "");
-        alert(msg);
-      } catch(e) {}
-      console.log("new-order", order);
+    socket.on("new-order", (payload) => {
+      // Bolt-like offer sheet with 20s timeout (non-breaking)
+      try{
+        const offer = payload && payload.ride ? payload.ride : payload;
+        const timeoutSec = (payload && payload.timeoutSec) ? Number(payload.timeoutSec) : 20;
+        if (!offer || !offer.id) { console.log("new-order", payload); return; }
+        window.__pt_last_offer = offer;
+
+        // Build modal lazily
+        let modal = document.getElementById('offerModal');
+        if(!modal){
+          const wrap = document.createElement('div');
+          wrap.innerHTML = `
+            <div id="offerModal" class="offerModal hidden">
+              <div class="offerCard">
+                <div class="offerTitle">Yeni sifariş</div>
+                <div class="offerRow"><span>📍</span><div><div class="offerLbl">Götürmə</div><div id="omPickup" class="offerVal">—</div></div></div>
+                <div class="offerRow"><span>🏁</span><div><div class="offerLbl">Çatdırma</div><div id="omDrop" class="offerVal">—</div></div></div>
+                <div class="offerMeta" id="omMeta">—</div>
+                <div class="offerTimer">⏳ <span id="omTimer">20</span>s</div>
+                <div class="offerActions">
+                  <button id="omReject" class="btnGhost">Rədd et</button>
+                  <button id="omAccept" class="btnPrimary">Qəbul et</button>
+                </div>
+              </div>
+            </div>`;
+          document.body.appendChild(wrap.firstElementChild);
+          modal = document.getElementById('offerModal');
+
+          // Styles (additive)
+          const st = document.createElement('style');
+          st.textContent = `
+            .offerModal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:flex-end;justify-content:center;z-index:100000;padding:16px;}
+            .offerModal.hidden{display:none;}
+            .offerCard{width:100%;max-width:520px;background:#fff;border-radius:18px;padding:16px 16px 14px;box-shadow:0 10px 40px rgba(0,0,0,.25);}
+            .offerTitle{font-weight:800;font-size:16px;margin-bottom:10px;}
+            .offerRow{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;}
+            .offerLbl{font-size:12px;color:#777;margin-bottom:2px;}
+            .offerVal{font-size:14px;font-weight:600;}
+            .offerMeta{font-size:13px;color:#333;background:#f7f7f7;border-radius:12px;padding:10px;margin:6px 0 10px;}
+            .offerTimer{font-weight:700;margin-bottom:10px;}
+            .offerActions{display:flex;gap:10px;}
+            .btnGhost{flex:1;background:#f1f1f1;border:0;border-radius:14px;padding:14px;font-size:15px;}
+            .btnPrimary{flex:1;background:#000;color:#fff;border:0;border-radius:14px;padding:14px;font-size:15px;}
+          `;
+          document.head.appendChild(st);
+
+          modal.addEventListener('click', (e)=>{ if(e.target===modal) modal.classList.add('hidden'); });
+        }
+
+        const pickup = (offer.pickup_text || offer.pickup || '');
+        const drop = (offer.drop_text || offer.dropoff || '');
+        const fare = (offer.fare!=null ? Number(offer.fare).toFixed(2) : (offer.price!=null ? offer.price : '—'));
+        document.getElementById('omPickup').textContent = pickup || '—';
+        document.getElementById('omDrop').textContent = drop || '—';
+        document.getElementById('omMeta').textContent = `Məsafə: ${Number(offer.distance_km||0).toFixed(2)} km  •  Qiymət: ${fare} AZN`;
+
+        let left = isFinite(timeoutSec) ? timeoutSec : 20;
+        const tEl = document.getElementById('omTimer');
+        tEl.textContent = String(left);
+
+        // clear old timer
+        if(window.__pt_offer_timer) clearInterval(window.__pt_offer_timer);
+        window.__pt_offer_timer = setInterval(()=>{
+          left -= 1;
+          if (tEl) tEl.textContent = String(Math.max(0,left));
+          if (left <= 0){
+            clearInterval(window.__pt_offer_timer);
+            if (modal) modal.classList.add('hidden');
+          }
+        }, 1000);
+
+        // buttons
+        const btnA = document.getElementById('omAccept');
+        const btnR = document.getElementById('omReject');
+        btnA.onclick = async ()=>{
+          try{
+            btnA.disabled = true;
+            await api('/api/driver/accept', { method:'POST', body:{ ride_id: offer.id } });
+            if (modal) modal.classList.add('hidden');
+            await loadOpenRides?.();
+            await loadNearby?.();
+          }catch(e){
+            alert('Xəta: '+(e.data?.error||e.message));
+          }finally{
+            btnA.disabled = false;
+          }
+        };
+        btnR.onclick = async ()=>{
+          try{
+            await api('/api/driver/reject', { method:'POST', body:{ ride_id: offer.id } });
+          }catch(_){}
+          if (modal) modal.classList.add('hidden');
+        };
+
+        if (modal) modal.classList.remove('hidden');
+        if (navigator.vibrate) { try{ navigator.vibrate([100,50,100]); }catch(_){} }
+
+      }catch(e){
+        console.log("new-order", payload);
+      }
     });
   } catch(e) {
     console.warn("socket init failed", e);

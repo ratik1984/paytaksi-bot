@@ -975,13 +975,46 @@
 
     // Ride accepted update for passenger UI (if you already have renderRide/poll)
     socket.on("ride:update", (data) => {
-      console.log("ride:update", data);
+      try{
+        console.log("ride:update", data);
+        if (data && data.ride) {
+          // merge ETA if provided
+          if (data.eta_min && window.rtSubEl && String(data.status)==='assigned') {
+            window.rtSubEl.textContent = `Sürücü təxminən ${data.eta_min} dəqiqəyə çatacaq`;
+          }
+          if (typeof window.renderRide === 'function') {
+            window.renderRide(data.ride);
+          }
+        } else if (data && data.ride_id && data.status && typeof window.setRideTrack === 'function') {
+          window.setRideTrack(String(data.status), data.ride_id);
+          if (data.eta_min && window.rtSubEl && String(data.status)==='assigned') {
+            window.rtSubEl.textContent = `Sürücü təxminən ${data.eta_min} dəqiqəyə çatacaq`;
+          }
+        }
+        if (data && data.prompt_rating && data.ride_id) {
+          if (typeof window.showRatingModal === 'function') window.showRatingModal(data.ride_id);
+        }
+      }catch(e){}
     });
   } catch(e) {
     console.warn("socket init failed", e);
   }
 })();
 </script>
+
+
+<!-- Rating Modal (after ride completion) -->
+<div id="ratingModal" class="ratingModal hidden">
+  <div class="ratingCard">
+    <div class="ratingTitle">Sürücünü qiymətləndir</div>
+    <div class="ratingStars" id="ratingStars"></div>
+    <textarea id="ratingComment" class="ratingComment" placeholder="Şərh (istəyə bağlı)"></textarea>
+    <div class="ratingActions">
+      <button id="btnRatingSkip" class="btnGhost">Keç</button>
+      <button id="btnRatingSend" class="btnPrimary" disabled>Göndər</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
