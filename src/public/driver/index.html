@@ -597,16 +597,6 @@ function fmtKm(x){
   return `${n.toFixed(2)} km`;
 }
 
-function openWaze(lat, lon){
-  const la = Number(lat), lo = Number(lon);
-  if (!isFinite(la) || !isFinite(lo)) return;
-  const url = `https://waze.com/ul?ll=${encodeURIComponent(la)},${encodeURIComponent(lo)}&navigate=yes`;
-  try{
-    if (window.Telegram?.WebApp?.openLink) return Telegram.WebApp.openLink(url);
-  }catch(_){ }
-  try{ window.open(url, '_blank'); }catch(_){ location.href = url; }
-}
-
 function getRadiusKm(){
   const v = Number(radiusSel?.value || localStorage.getItem('pt_radius_km') || 3);
   return isFinite(v) ? v : 3;
@@ -670,9 +660,7 @@ async function loadNearby(opts={}){
       div.innerHTML = `<b>#${r.id}</b> • ${fmtKm(r.km_to_pickup)} yaxınlıqda<br>
         ${r.pickup_text||''} → ${r.drop_text||''}<br>
         Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
-        <button data-id="${r.id}">✅ Qəbul et</button>
-      <button data-waze="pickup">🧭 Waze (Götürmə)</button>
-      <button data-waze="drop">🧭 Waze (Çatdırma)</button>`;
+        <button data-id="${r.id}">✅ Qəbul et</button>`;
       div.querySelector('button').onclick = async ()=>{
         try{
           await api('/api/driver/accept', { method:'POST', body:{ ride_id: r.id } });
@@ -714,7 +702,43 @@ function startLocationLoop(){
       await loadNearby();
       await loadNearbyDrivers();
     }catch(_){ }
-  }, 10000);
+  }, 3000);
+}
+
+// Prefer watchPosition for smoother, real-time updates (fallback to interval above)
+let __watchId = null;
+function startWatchLocation() {
+  try {
+    if (!navigator.geolocation || !navigator.geolocation.watchPosition) return;
+    if (__watchId !== null) return;
+    __watchId = navigator.geolocation.watchPosition(
+      async (pos) => {
+        try {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const heading = (typeof pos.coords.heading === 'number' && !isNaN(pos.coords.heading)) ? pos.coords.heading : null;
+          await api('/api/driver/location', { method:'POST', body:{ lat, lon, heading } });
+        } catch (e) {
+          // ignore
+        }
+      },
+      () => {
+        // ignore
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+    );
+  } catch (e) {
+    // ignore
+  }
+}
+
+function stopWatchLocation() {
+  try {
+    if (__watchId !== null && navigator.geolocation && navigator.geolocation.clearWatch) {
+      navigator.geolocation.clearWatch(__watchId);
+    }
+  } catch (e) {}
+  __watchId = null;
 }
 
 function stopLocationLoop(){
@@ -745,8 +769,10 @@ async function refreshAfterLogin(){
       await loadNearby();
       await loadNearbyDrivers();
       startLocationLoop();
+      startWatchLocation();
     } else {
       stopLocationLoop();
+      stopWatchLocation();
     }
   }catch(_){ }
   await loadOpenRides();
@@ -764,6 +790,7 @@ document.getElementById('btnGoOnline').onclick = async ()=>{
     await sendLocationOnce();
     await loadNearby();
     startLocationLoop();
+    startWatchLocation();
     await loadOpenRides();
   }catch(e){
     setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
@@ -775,6 +802,7 @@ document.getElementById('btnGoOffline').onclick = async ()=>{
     await api('/api/driver/set_online', { method:'POST', body:{ online:false }});
     setOnlineUI(false);
     stopLocationLoop();
+    stopWatchLocation();
   }catch(e){
     setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
   }
@@ -927,14 +955,6 @@ async function loadOpenRides(){
           await loadOpenRides();
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
-      // Waze navigation
-      div.querySelectorAll('button[data-waze]').forEach((b)=>{
-        b.onclick = ()=>{
-          const t = b.getAttribute('data-waze');
-          if (t==='pickup') openWaze(r.pickup_lat, r.pickup_lon);
-          if (t==='drop') openWaze(r.drop_lat, r.drop_lon);
-        };
-      });
       ridesEl.appendChild(div);
     });
 
@@ -945,9 +965,7 @@ async function loadOpenRides(){
       div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
       ${r.pickup_text||''} → ${r.drop_text||''}<br>
       Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
-      <button data-id="${r.id}">✅ Qəbul et</button>
-      <button data-waze="pickup">🧭 Waze (Götürmə)</button>
-      <button data-waze="drop">🧭 Waze (Çatdırma)</button>`;
+      <button data-id="${r.id}">✅ Qəbul et</button>`;
       div.querySelector('button').onclick = async ()=>{
         try{
           await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
@@ -955,14 +973,6 @@ async function loadOpenRides(){
           await loadOpenRides();
         }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
       };
-      // Waze navigation
-      div.querySelectorAll('button[data-waze]').forEach((b)=>{
-        b.onclick = ()=>{
-          const t = b.getAttribute('data-waze');
-          if (t==='pickup') openWaze(r.pickup_lat, r.pickup_lon);
-          if (t==='drop') openWaze(r.drop_lat, r.drop_lon);
-        };
-      });
       ridesEl.appendChild(div);
     });
 
