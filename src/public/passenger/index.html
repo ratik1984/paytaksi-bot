@@ -5,137 +5,70 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
   <title>PayTaksi Passenger</title>
 
-  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
   <style>
     html, body { margin:0; padding:0; height:100%; background:#f5f5f5; }
-    #map {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100%;
-      height: 100vh;
-      z-index: 1;
-    }
+    #map { position: fixed; top: 0; left: 0; width: 100%; height: 100vh; z-index: 1; }
 
     .topBtns {
-      position: fixed;
-      top: 18px;
-      left: 18px;
-      right: 18px;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      z-index: 2000;
-      pointer-events: none;
+      position: fixed; top: 18px; left: 18px; right: 18px;
+      display: flex; justify-content: space-between; gap: 12px;
+      z-index: 2000; pointer-events: none;
     }
     .btnCircle{
-      width: 52px; height: 52px;
-      border-radius: 999px;
-      background: #fff;
-      box-shadow: 0 8px 20px rgba(0,0,0,.12);
+      width: 52px; height: 52px; border-radius: 999px;
+      background: #fff; box-shadow: 0 8px 20px rgba(0,0,0,.12);
       display:flex; align-items:center; justify-content:center;
-      pointer-events: all;
-      border: 0;
-      font-size: 22px;
+      pointer-events: all; border: 0; font-size: 22px;
     }
 
     .panel {
-      position: fixed;
-      left: 0; right: 0; bottom: 0;
-      background: #fff;
-      border-radius: 22px 22px 0 0;
-      padding: 18px 18px 18px 18px;
-      z-index: 3000;
+      position: fixed; left: 0; right: 0; bottom: 0;
+      background: #fff; border-radius: 22px 22px 0 0;
+      padding: 18px; z-index: 3000;
       box-shadow: 0 -10px 25px rgba(0,0,0,.12);
     }
-    .grab {
-      width: 48px;
-      height: 5px;
-      background: #ddd;
-      border-radius: 99px;
-      margin: 0 auto 12px;
-    }
+    .grab { width: 48px; height: 5px; background: #ddd; border-radius: 99px; margin: 0 auto 12px; }
     h2 { margin: 0 0 12px 0; font-size: 34px; letter-spacing: -0.6px; }
 
     .input {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 14px 14px;
-      border-radius: 12px;
-      border: 1px solid #e5e5e5;
-      font-size: 16px;
-      outline: none;
+      width: 100%; box-sizing: border-box;
+      padding: 14px; border-radius: 12px;
+      border: 1px solid #e5e5e5; font-size: 16px; outline: none;
     }
 
-    .hintRow {
-      display:flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-top: 10px;
-      font-size: 13px;
-      color: #666;
-    }
-    .price {
-      font-weight: 700;
-      color: #111;
-    }
+    .hintRow { display:flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 13px; color: #666; }
+    .price { font-weight: 700; color: #111; }
 
     .btnPrimary {
-      width: 100%;
-      margin-top: 14px;
-      padding: 16px 14px;
-      border: 0;
-      border-radius: 14px;
-      background: #111;
-      color: #fff;
-      font-size: 16px;
-      cursor: pointer;
+      width: 100%; margin-top: 14px; padding: 16px 14px;
+      border: 0; border-radius: 14px;
+      background: #111; color: #fff; font-size: 16px; cursor: pointer;
     }
-    .btnPrimary:disabled{
-      opacity: .55;
-      cursor: not-allowed;
+    .btnPrimary:disabled{ opacity: .55; cursor: not-allowed; }
+
+    .btnAlt {
+      width: 100%; margin-top: 10px; padding: 14px 14px;
+      border: 1px solid #e5e5e5; border-radius: 14px;
+      background: #fff; color: #111; font-size: 15px; cursor: pointer;
     }
 
     .toast {
-      position: fixed;
-      left: 14px;
-      right: 14px;
-      bottom: 190px;
-      background: rgba(0,0,0,.72);
-      color:#fff;
-      padding: 10px 12px;
-      border-radius: 12px;
-      font-size: 13px;
-      z-index: 4000;
-      display:none;
+      position: fixed; left: 14px; right: 14px; bottom: 190px;
+      background: rgba(0,0,0,.72); color:#fff;
+      padding: 10px 12px; border-radius: 12px; font-size: 13px;
+      z-index: 4000; display:none;
     }
 
-    /* Simple autocomplete list */
-    .acBox {
-      position: relative;
-      z-index: 5000;
-    }
+    .acBox { position: relative; z-index: 5000; }
     .acList {
-      position: absolute;
-      left: 0; right: 0;
-      top: calc(100% + 8px);
-      background: #fff;
-      border: 1px solid #eee;
-      border-radius: 12px;
+      position: absolute; left: 0; right: 0; top: calc(100% + 8px);
+      background: #fff; border: 1px solid #eee; border-radius: 12px;
       box-shadow: 0 10px 22px rgba(0,0,0,.12);
-      overflow: hidden;
-      display: none;
-      max-height: 230px;
-      overflow-y: auto;
+      overflow: hidden; display: none; max-height: 230px; overflow-y: auto;
     }
-    .acItem {
-      padding: 12px 12px;
-      border-bottom: 1px solid #f3f3f3;
-      cursor: pointer;
-      font-size: 14px;
-      color: #111;
-    }
+    .acItem { padding: 12px; border-bottom: 1px solid #f3f3f3; cursor: pointer; font-size: 14px; color: #111; }
     .acItem:last-child { border-bottom: 0; }
     .acItem:hover { background: #f7f7f7; }
   </style>
@@ -166,15 +99,13 @@
     </div>
 
     <button class="btnPrimary" id="orderBtn" disabled>Sifariş et</button>
+    <button class="btnAlt" id="driversBtn">3 km sürücüləri göstər</button>
   </div>
 
-  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
-    // =============================
-    // Helpers
-    // =============================
+    // ===== Utils
     const toastEl = document.getElementById("toast");
     function toast(msg, ms=2400){
       toastEl.textContent = msg;
@@ -182,6 +113,14 @@
       clearTimeout(toastEl._t);
       toastEl._t = setTimeout(()=>toastEl.style.display="none", ms);
     }
+
+    function getPtToken(){
+      try{
+        const u = new URL(location.href);
+        return u.searchParams.get("pt") || "";
+      }catch(e){ return ""; }
+    }
+    const PT = getPtToken();
 
     function haversineKm(lat1, lon1, lat2, lon2) {
       const R = 6371;
@@ -196,33 +135,33 @@
       return R * c;
     }
 
-    // Tarif: 0–3km = 3.50 AZN, sonra hər km 0.40
+    // Tarif: 0–3km = 3.50 AZN, sonra hər km 0.40 (yuvarlaqlaşdırma YOX)
     function calcFare(distanceKm){
       if (!isFinite(distanceKm) || distanceKm <= 0) return null;
       if (distanceKm <= 3) return 3.50;
       return 3.50 + (distanceKm - 3) * 0.40;
     }
 
-    // =============================
-    // Map init
-    // =============================
+    // ===== Map
     const gpsStatus = document.getElementById("gpsStatus");
     const destInput = document.getElementById("destination");
     const acList = document.getElementById("acList");
     const fareText = document.getElementById("fareText");
     const orderBtn = document.getElementById("orderBtn");
+    const driversBtn = document.getElementById("driversBtn");
     const locBtn = document.getElementById("locBtn");
 
     const map = L.map('map', { zoomControl: true }).setView([40.4093, 49.8671], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap'
-    }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
 
     let myLatLng = null;
     let myMarker = null;
 
     let destLatLng = null;
     let destMarker = null;
+
+    // drivers markers
+    let driverLayer = L.layerGroup().addTo(map);
 
     function setMyLocation(lat, lng){
       myLatLng = { lat, lng };
@@ -243,7 +182,6 @@
       }
       if (label) destMarker.bindPopup(label);
 
-      // Fare update
       if (myLatLng){
         const km = haversineKm(myLatLng.lat, myLatLng.lng, lat, lng);
         const fare = calcFare(km);
@@ -251,13 +189,10 @@
       } else {
         fareText.textContent = "—";
       }
-
       orderBtn.disabled = !(myLatLng && destLatLng);
     }
 
-    // =============================
-    // GPS
-    // =============================
+    // ===== GPS
     function requestGPS(){
       if (!navigator.geolocation){
         gpsStatus.textContent = "GPS dəstəklənmir.";
@@ -275,20 +210,18 @@
           gpsStatus.textContent = "GPS hazırdır.";
           orderBtn.disabled = !(myLatLng && destLatLng);
         },
-        (err) => {
+        () => {
           gpsStatus.textContent = "GPS icazəsi yoxdur.";
           toast("GPS icazəsi verilmədi. Telefon ayarlarından Location aç.");
         },
         { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
       );
 
-      // Live updates
       navigator.geolocation.watchPosition(
         (pos) => {
           const lat = pos.coords.latitude;
           const lng = pos.coords.longitude;
           setMyLocation(lat, lng);
-          // fare update if destination selected
           if (destLatLng){
             const km = haversineKm(myLatLng.lat, myLatLng.lng, destLatLng.lat, destLatLng.lng);
             const fare = calcFare(km);
@@ -306,35 +239,20 @@
       else toast("GPS hələ hazır deyil.");
     });
 
-    // =============================
-    // Autocomplete (Nominatim, AZ)
-    // =============================
-    let acData = []; // [{label, lat, lon}]
+    // ===== Autocomplete (Nominatim, AZ)
+    let acData = [];
     let acTimer = null;
 
-    function hideList(){
-      acList.style.display = "none";
-      acList.innerHTML = "";
-    }
-
+    function hideList(){ acList.style.display = "none"; acList.innerHTML = ""; }
     function showList(items){
       if (!items || !items.length) { hideList(); return; }
-      acList.innerHTML = items.map((it, idx) => (
-        `<div class="acItem" data-idx="${idx}">${it.label}</div>`
-      )).join("");
+      acList.innerHTML = items.map((it, idx) => `<div class="acItem" data-idx="${idx}">${it.label}</div>`).join("");
       acList.style.display = "block";
     }
 
     async function nominatimSearch(q){
-      // Baku prioritetli axtarış (AZ), limit 6
-      const url =
-        "https://nominatim.openstreetmap.org/search?format=json&limit=6" +
-        "&countrycodes=az&accept-language=az" +
-        "&q=" + encodeURIComponent(q);
-
-      const res = await fetch(url, {
-        headers: { "Accept": "application/json" }
-      });
+      const url = "https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=az&accept-language=az&q=" + encodeURIComponent(q);
+      const res = await fetch(url, { headers: { "Accept": "application/json" }});
       const json = await res.json();
       return (json || []).map(x => ({
         label: x.display_name,
@@ -346,74 +264,105 @@
     destInput.addEventListener("input", () => {
       const q = destInput.value.trim();
       if (acTimer) clearTimeout(acTimer);
-
-      if (q.length < 3){
-        hideList();
-        return;
-      }
+      if (q.length < 3){ hideList(); return; }
 
       acTimer = setTimeout(async () => {
         try{
           const items = await nominatimSearch(q);
           acData = items;
           showList(items);
-        } catch(e){
+        }catch(e){
           hideList();
         }
       }, 350);
     });
 
-    // click select
     acList.addEventListener("click", (e) => {
       const item = e.target.closest(".acItem");
       if (!item) return;
       const idx = parseInt(item.getAttribute("data-idx"), 10);
       const sel = acData[idx];
       if (!sel) return;
-
       destInput.value = sel.label;
       hideList();
-
       setDestination(sel.lat, sel.lon, "Təyinat");
       map.setView([sel.lat, sel.lon], 14);
     });
 
-    // hide on outside click
-    document.addEventListener("click", (e) => {
-      if (!e.target.closest(".acBox")) hideList();
+    document.addEventListener("click", (e) => { if (!e.target.closest(".acBox")) hideList(); });
+
+    // ===== Show drivers (3km) using passenger API (requires Telegram auth via pt)
+    driversBtn.addEventListener("click", async () => {
+      if (!myLatLng) { toast("GPS hazır deyil."); return; }
+      if (!PT) { toast("pt token yoxdur. Telegram içindən aç."); return; }
+
+      try{
+        const url = `/api/passenger/nearby_drivers?lat=${encodeURIComponent(myLatLng.lat)}&lon=${encodeURIComponent(myLatLng.lng)}&radius_km=3&pt=${encodeURIComponent(PT)}`;
+        const res = await fetch(url);
+        const j = await res.json();
+
+        if (!j.ok){
+          toast("API xətası: " + (j.reason || j.error || "unknown"));
+          return;
+        }
+
+        const drivers = j.drivers || [];
+        driverLayer.clearLayers();
+
+        if (!drivers.length){
+          toast("3 km-də online sürücü tapılmadı.");
+          return;
+        }
+
+        drivers.forEach(d => {
+          L.circleMarker([d.lat, d.lon], { radius: 6 }).addTo(driverLayer)
+            .bindPopup("Sürücü #" + d.id);
+        });
+
+        toast(`Tapıldı: ${drivers.length} sürücü`);
+      }catch(e){
+        toast("Driver siyahısı alınmadı (server xətası).");
+      }
     });
 
-    // =============================
-    // Order button (Demo action)
-    // =============================
+    // ===== Order ride (real backend)
     orderBtn.addEventListener("click", async () => {
       if (!myLatLng) { toast("GPS hazır deyil."); return; }
       if (!destLatLng) { toast("Təyinat seçilməyib."); return; }
+      if (!PT) { toast("pt token yoxdur. Telegram içindən aç."); return; }
 
       const km = haversineKm(myLatLng.lat, myLatLng.lng, destLatLng.lat, destLatLng.lng);
       const fare = calcFare(km);
 
-      // Burada backend-ə göndərə bilərik.
-      // Hələlik demo: alert + console
       const payload = {
-        pickup: myLatLng,
-        dropoff: { lat: destLatLng.lat, lng: destLatLng.lng },
-        dropoffLabel: destLatLng.label || destInput.value,
-        distanceKm: km,
-        fare
+        pt: PT,
+        pickup_lat: myLatLng.lat,
+        pickup_lon: myLatLng.lng,
+        pickup_text: "Pickup",
+        drop_lat: destLatLng.lat,
+        drop_lon: destLatLng.lng,
+        drop_text: destLatLng.label || destInput.value
       };
 
-      console.log("ORDER PAYLOAD:", payload);
-      toast("Sifariş hazırlandı: " + (fare ? fare.toFixed(2) : "—") + " AZN");
-
-      // Əgər səndə ride create endpoint varsa, buranı açarıq:
-      // await fetch("/api/passenger/create_ride", {method:"POST", headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      try{
+        const res = await fetch("/api/passenger/create_ride", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const j = await res.json();
+        if (!j.ok){
+          toast("Sifariş alınmadı: " + (j.reason || j.error || "unknown"));
+          return;
+        }
+        toast("Sifariş göndərildi. Qiymət: " + (fare ? fare.toFixed(2) : "—") + " AZN");
+        console.log("ride:", j.ride);
+      }catch(e){
+        toast("Sifariş göndərilmədi (server xətası).");
+      }
     });
 
-    // Menu button placeholder
-    document.getElementById("menuBtn").addEventListener("click", () => {
-      toast("Menu (sonra əlavə edəcəyik)");
-    });
+    document.getElementById("menuBtn").addEventListener("click", () => toast("Menu (sonra əlavə edəcəyik)"));
 
   </script>
 </body>

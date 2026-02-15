@@ -1,18 +1,27 @@
-PAYTAKSI - BOLT STYLE LIVE DRIVERS (OSM/Leaflet) + WAZE (Additive Patch)
+PAYTAKSI - DEBUG + PASSENGER NEARBY DRIVERS PATCH
 
-What this patch adds:
-- Passenger endpoint: GET /api/passenger/nearby_drivers?lat=...&lon=...&radius_km=3
-  Returns nearby ONLINE drivers (fresh pings) as icons for the passenger map.
-- Passenger UI: live driver icons on the Leaflet map (updates every 3 seconds, smooth movement).
-- Driver UI: Waze navigation buttons (Pickup / Drop) on each ride card.
-- SQL patch: adds driver location + online columns safely (IF NOT EXISTS).
+Bu patch nə edir?
+1) /api/passenger/nearby_drivers endpoint-i əlavə edir (Telegram auth tələb edir).
+   - Query: lat, lon, radius_km (default 3), pt (Telegram WebApp token fallback).
+2) /api/debug/nearby_drivers endpoint-i əlavə edir (Telegram auth BYPASS) amma yalnız DEBUG_KEY env var varsa.
+   - Query: lat, lon, radius_km, debug_key
+3) Passenger UI-də:
+   - pt token URL-dən oxunur və API çağırışlarına əlavə olunur
+   - "3 km sürücüləri göstər" düyməsi nearby drivers-ı xəritədə göstərir
+   - "Sifariş et" düyməsi /api/passenger/create_ride-ə real POST edir
 
-Install:
-1) Extract this ZIP into your project root (same level as src/, db/, package.json). Overwrite when asked.
-2) Run SQL patch:
-   db/patches/20260215_passenger_nearby_drivers_live.sql
-3) Deploy / restart the service.
+Quraşdırma:
+A) Faylları kopyala:
+- src/server.js  (mövcud faylın üstünə yazın)
+- src/public/passenger/index.html  (mövcud faylın üstünə yazın)
 
-Notes:
-- Radius is 3km by default in the passenger endpoint. Passenger UI requests radius_km=3.
-- Fare already matches your tariff in server.js: BASE_FARE=3.50, BASE_KM=3.0, PER_KM_AFTER=0.40.
+B) Deploy/Restart et.
+
+C) DEBUG endpoint istifadə etmək istəsən (opsional):
+- Render Environment Variables -> DEBUG_KEY = uzun random bir string yaz.
+- Sonra brauzerdə test:
+  /api/debug/nearby_drivers?lat=40.4093&lon=49.8671&radius_km=3&debug_key=YOUR_DEBUG_KEY
+
+Qeyd:
+- /api/passenger/nearby_drivers brauzerdə işləməyəcək (Telegram auth var).
+  Telegram WebApp içindən işləyir, çünki URL-də pt olur və frontend onu göndərir.
