@@ -1205,6 +1205,95 @@ app.get('/api/debug/nearby_drivers', async (req, res) => {
   }
 });
 
+// Aliases for old debug URLs (some users may call /app/passenger/api/...)
+app.get('/app/passenger/api/debug/db_migrate', (req,res) => {
+  const qs = req.originalUrl.split('?')[1];
+  return res.redirect(302, '/api/debug/db_migrate' + (qs ? ('?' + qs) : ''));
+});
+app.get('/app/passenger/api/debug/nearby_drivers', (req,res) => {
+  const qs = req.originalUrl.split('?')[1];
+  return res.redirect(302, '/api/debug/nearby_drivers' + (qs ? ('?' + qs) : ''));
+});
+
+// Debug helpers (no Telegram initData) - protected by DEBUG_KEY
+function debugKeyOk(req){
+  const key = String(req.query.debug_key || '');
+  const expected = String(process.env.DEBUG_KEY || '');
+  return Boolean(expected) && key === expected;
+}
+
+// GET /api/driver/set_online?driver_id=1&online=1&lat=...&lon=...&debug_key=...
+// This is ONLY for debugging from a normal browser. Real app should use POST with Telegram auth.
+app.get('/api/driver/set_online', async (req, res) => {
+  if (!debugKeyOk(req)) {
+    return res.status(405).json({ ok:false, error:'use_post', hint:'Use POST /api/driver/set_online (Telegram auth) or provide debug_key for debug mode.' });
+  }
+  try{
+    await ensureDispatchTables();
+    const driverId = Number(req.query.driver_id);
+    const online = String(req.query.online ?? '1') !== '0';
+    const lat = req.query.lat != null ? Number(req.query.lat) : null;
+    const lon = req.query.lon != null ? Number(req.query.lon) : null;
+
+    if (!Number.isFinite(driverId) || driverId <= 0) return res.status(400).json({ ok:false, error:'invalid_driver_id' });
+
+    // ensure columns exist
+    await driversHaveOnlineCols();
+    await driversHaveLocationCols();
+
+    const now = new Date();
+    await pool.query(
+      `UPDATE drivers
+         SET is_online=$2,
+             last_online_at=CASE WHEN $2 THEN NOW() ELSE last_online_at END,
+             last_seen_at=NOW(),
+             last_lat=COALESCE($3,last_lat),
+             last_lon=COALESCE($4,last_lon),
+             last_location_at=CASE WHEN $3 IS NOT NULL AND $4 IS NOT NULL THEN NOW() ELSE last_location_at END
+       WHERE id=$1`,
+      [driverId, online, lat, lon]
+    );
+    return res.json({ ok:true, driver_id: driverId, is_online: online, lat, lon, at: now.toISOString() });
+  }catch(e){
+    console.error('debug set_online error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// GET /api/debug/driver_ping?driver_id=1&lat=...&lon=...&online=1&debug_key=...
+app.get('/api/debug/driver_ping', async (req,res) => {
+  if (!debugKeyOk(req)) return res.status(401).json({ ok:false, error:'forbidden' });
+  try{
+    await ensureDispatchTables();
+    const driverId = Number(req.query.driver_id);
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    const online = String(req.query.online ?? '1') !== '0';
+
+    if (!Number.isFinite(driverId) || driverId <= 0) return res.status(400).json({ ok:false, error:'invalid_driver_id' });
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ ok:false, error:'invalid_coords' });
+
+    await driversHaveOnlineCols();
+    await driversHaveLocationCols();
+
+    await pool.query(
+      `UPDATE drivers
+         SET is_online=$2,
+             last_online_at=CASE WHEN $2 THEN NOW() ELSE last_online_at END,
+             last_seen_at=NOW(),
+             last_lat=$3,
+             last_lon=$4,
+             last_location_at=NOW()
+       WHERE id=$1`,
+      [driverId, online, lat, lon]
+    );
+    return res.json({ ok:true, driver_id: driverId, is_online: online, lat, lon });
+  }catch(e){
+    console.error('debug driver_ping error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 // ---- Driver: register + upload docs
 app.post(
   '/api/driver/register',
