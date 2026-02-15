@@ -26,10 +26,19 @@
       --btn:#111111;
       --danger:#b91c1c;
       --radius:18px;
+      /*
+        Telegram/Android WebViews sometimes report a "layout viewport" taller than what is actually
+        visible (100%/100vh bugs). That can push the bottom sheet out of view so the screen becomes
+        "all map". We set --app-h from window.innerHeight (and Telegram viewport events).
+      */
+      --app-h: 100vh;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-top: env(safe-area-inset-top, 0px);
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
     html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
-    #wrap{ position:fixed; inset:0; display:flex; flex-direction:column; }
+    /* Use explicit height instead of inset:0 to avoid layout-viewport issues on mobile WebViews */
+    #wrap{ position:fixed; left:0; right:0; top:0; height: var(--app-h); display:flex; flex-direction:column; padding-top: var(--safe-top); }
     #map{ position:absolute; inset:0; }
     .topBtns{
       position:absolute; top:14px; left:14px; right:14px;
@@ -39,7 +48,7 @@
     .fab svg{ width:22px; height:22px; }
 
     .sheet{
-      position:absolute; left:0; right:0; bottom:0;
+      position:absolute; left:0; right:0; bottom: var(--safe-bottom);
       background:var(--card);
       border-top-left-radius:24px;
       border-top-right-radius:24px;
@@ -114,7 +123,7 @@
     .priceRow .val{font-weight:900;font-size:18px}
 
     /* keep room for Telegram bottom bar / phone nav */
-    .safePad{ height:12px; }
+    .safePad{ height: calc(12px + var(--safe-bottom)); }
 
     /* Tiny debug strip (only shown on errors) */
     .debugStrip{position:fixed;left:10px;right:10px;top:10px;background:rgba(0,0,0,.82);color:#fff;padding:10px 12px;border-radius:14px;font-size:12px;display:none;z-index:10000;white-space:pre-wrap}
@@ -221,6 +230,17 @@
     const u = tgUser();
     if (window.Telegram?.WebApp){
       try{ window.Telegram?.WebApp?.expand?.(); }catch(_){ }
+    }
+
+    // Keep bottom sheet visible on mobile WebViews (Telegram/Android) where 100vh can be wrong.
+    function setAppHeight(){
+      const h = (window.Telegram?.WebApp?.viewportStableHeight) || window.innerHeight || document.documentElement.clientHeight;
+      document.documentElement.style.setProperty('--app-h', h + 'px');
+    }
+    setAppHeight();
+    window.addEventListener('resize', setAppHeight);
+    if (window.Telegram?.WebApp?.onEvent){
+      try{ window.Telegram.WebApp.onEvent('viewportChanged', setAppHeight); }catch(_){ }
     }
 
     function haversineKm(a, b){
