@@ -802,26 +802,48 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
   try {
-    const passenger_tg_id = String(req.tgUser.id);
-    const ride_id = Number(req.body.ride_id);
+    const ride_id = Number(req.body?.ride_id);
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
+    // Map Telegram user to our internal passenger user id
+    const passenger = await upsertUser(req.tgUser, 'passenger');
+
+    // Fetch ride (ensure ownership)
+    const rideQ = await pool.query(
+      `SELECT r.*, u.tg_id AS driver_tg_id
+       FROM rides r
+       LEFT JOIN drivers d ON d.id = r.driver_id
+       LEFT JOIN users u ON u.id = d.user_id
+       WHERE r.id=$1 AND r.passenger_user_id=$2`,
+      [ride_id, passenger.id]
+    );
+    const ride = rideQ.rows[0];
     if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
 
-    if (!['searching','assigned'].includes(ride.status)) {
+    if (!['searching', 'assigned'].includes(String(ride.status))) {
       return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
     }
 
-    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+    const upd = await pool.query(
+      `UPDATE rides
+       SET status='cancelled', cancelled_at=NOW()
+       WHERE id=$1 AND passenger_user_id=$2 AND status IN ('searching','assigned')
+       RETURNING id`,
+      [ride_id, passenger.id]
+    );
+    if (upd.rowCount === 0) {
+      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+    }
 
     if (ride.driver_tg_id) {
-      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
+      try {
+        await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`);
+      } catch {}
     }
 
     return res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error('cancel_ride failed:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
@@ -829,19 +851,7 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT r.*, 
-            d.id as driver_id,
-            d.phone as driver_phone,
-            d.plate as driver_plate,
-            d.car_make as driver_car_make,
-            d.car_model as driver_car_model,
-            d.car_year as driver_car_year,
-            d.car_color as driver_car_color,
-            d.last_lat as driver_last_lat,
-            d.last_lon as driver_last_lon,
-            u.tg_id as driver_tg_id,
-            u.first_name as driver_first_name,
-            u.username as driver_username
+    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
@@ -1347,75 +1357,15 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  // IMPORTANT: Accept must assign the ride (status='assigned' + driver_id). Otherwise passenger keeps seeing "searching".
-  // Also enforce that the offer belongs to this driver and is unexpired.
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const busyQ = await client.query(
-      `SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
-      [driver.id]
-    );
-    if (busyQ.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, error: 'driver_busy' });
-    }
-
-    const rideLock = await client.query(
-      `SELECT id, status, offered_driver_id, offer_expires_at, passenger_user_id
-       FROM rides WHERE id=$1 FOR UPDATE`,
-      [ride_id]
-    );
-    const ride = rideLock.rows[0];
-    if (!ride || ride.status !== 'searching') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, error: 'ride_not_available' });
-    }
-
-    const expOk = ride.offer_expires_at && new Date(ride.offer_expires_at).getTime() > Date.now();
-    if (Number(ride.offered_driver_id) !== Number(driver.id) || !expOk) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, error: 'not_offered_to_you' });
-    }
-
-    const rideQ = await client.query(
-      `UPDATE rides
-       SET driver_id=$1,
-           status='assigned',
-           offered_driver_id=NULL,
-           offer_expires_at=NULL,
-           updated_at=NOW()
-       WHERE id=$2 AND status='searching'
-       RETURNING *`,
-      [driver.id, ride_id]
-    );
-    const updated = rideQ.rows[0];
-    if (!updated) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, error: 'ride_not_available' });
-    }
-
-    await client.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
-    await client.query('COMMIT');
-
-    // Best-effort passenger notification
-    try {
-      const pQ = await pool.query(`SELECT tg_id FROM users WHERE id=$1`, [updated.passenger_user_id]);
-      const passengerTgId = pQ.rows[0]?.tg_id;
-      if (passengerTgId) {
-        await sendTelegramToRole('passenger', passengerTgId, `✅ Sürücü sifarişi qəbul etdi (#${updated.id}).`);
-      }
-    } catch {}
-
-    return res.json({ ok: true, ride: updated });
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('driver accept failed:', e);
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  } finally {
-    client.release();
-  }
+  const rideQ = await pool.query(
+    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
+     WHERE id=$2 AND status='searching'
+     RETURNING *`,
+    [driver.id, ride_id]
+  );
+  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
+  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+  res.json({ ok: true, ride: rideQ.rows[0] });
 });
 
 
