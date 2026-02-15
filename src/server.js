@@ -11,7 +11,6 @@ import { validateTelegramWebAppData } from './telegramAuth.js';
 import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import http from 'http';
 
 dotenv.config();
 
@@ -27,8 +26,6 @@ app.use(express.urlencoded({ extended: true }));
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'CHANGE_ME_SECRET';
-const DEBUG_KEY = process.env.DEBUG_KEY || '';
-
 
 // --- Signed token fallback for WebApp auth when Telegram initData is empty ---
 // Token: base64url(JSON payload) + '.' + base64url(HMAC_SHA256(payloadB64, WEBHOOK_SECRET))
@@ -143,158 +140,6 @@ app.get("/app", (req, res) => {
 
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
-
-// ---- Debug endpoints (disabled unless DEBUG_KEY is set)
-// These endpoints bypass Telegram auth ONLY for troubleshooting.
-// Enable by setting env DEBUG_KEY to a strong random string.
-// Call with ?debug_key=YOUR_KEY
-app.get('/api/debug/nearby_drivers', requireDebugKey, async (req, res) => {
-  const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
-  const lat = Number(req.query.lat);
-  const lon = Number(req.query.lon);
-  if (Number.isNaN(lat) || Number.isNaN(lon)) return res.status(400).json({ ok:false, error:'lat/lon required' });
-
-  await ensureDispatchTables();
-  const hasOnline = await driversHaveOnlineCols();
-
-  const dLat = radiusKm / 111.0;
-  const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
-  const dLon = radiusKm / (111.0 * cos);
-  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-
-  const q = await pool.query(
-    `SELECT id, last_lat, last_lon, last_loc_at, is_online
-       FROM drivers
-      WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-        AND last_lat BETWEEN $1 AND $2
-        AND last_lon BETWEEN $3 AND $4
-        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
-        AND (status IS NULL OR status = 'approved')
-        ${hasOnline ? "AND is_online = TRUE" : ""}
-      LIMIT 300`,
-    [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
-  );
-
-  const drivers = (q.rows || [])
-    .map(r => {
-      const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
-      return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100, online: hasOnline ? !!r.is_online : true, last_loc_at: r.last_loc_at ? new Date(r.last_loc_at).toISOString() : null };
-    })
-    .filter(d => d.km <= radiusKm)
-    .sort((a,b) => a.km - b.km);
-
-  return res.json({ ok:true, drivers, radius_km: radiusKm });
-});
-
-
-// ---- Bolt-like live drivers (SSE)
-// Telegram WebView doesn't reliably allow custom headers on EventSource, so we auth via ?pt=...
-// Events:
-//  - event: snapshot  data: { drivers:[{id,lat,lon,updated_at,online}] }
-//  - event: upsert    data: { id,lat,lon,updated_at,online }
-//  - event: remove    data: { id }
-const sseClients = new Set(); // { res, role, uid }
-
-function sseWrite(res, event, obj) {
-  try {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  } catch (_) {}
-}
-
-async function fetchLiveDrivers({ limit = 200 } = {}) {
-  await ensureDispatchTables();
-  const hasOnline = await driversHaveOnlineCols();
-  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-  const q = await pool.query(
-    `SELECT id, last_lat, last_lon, last_loc_at, is_online
-       FROM drivers
-      WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($1 || ' minutes')::interval)
-        AND (status IS NULL OR status = 'approved')
-        ${hasOnline ? "AND is_online = TRUE" : ""}
-      ORDER BY COALESCE(last_loc_at, NOW()) DESC
-      LIMIT $2`,
-    [String(freshnessMin), Number(limit)]
-  );
-  return (q.rows || []).map((r) => ({
-    id: Number(r.id),
-    lat: Number(r.last_lat),
-    lon: Number(r.last_lon),
-    updated_at: r.last_loc_at ? new Date(r.last_loc_at).toISOString() : null,
-    online: hasOnline ? !!r.is_online : true
-  }));
-}
-
-function broadcastDriverUpsert(payload) {
-  for (const c of sseClients) {
-    sseWrite(c.res, 'upsert', payload);
-  }
-}
-function broadcastDriverRemove(id) {
-  for (const c of sseClients) {
-    sseWrite(c.res, 'remove', { id: Number(id) });
-  }
-}
-
-app.get('/sse/drivers', async (req, res) => {
-  // Auth via pt token only (EventSource can't set headers reliably)
-  const pt = req.query?.pt;
-  const v = verifyPtToken(pt);
-  if (!v.ok || !['passenger', 'admin'].includes(v.payload.role)) {
-    return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
-  }
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders?.();
-
-  // Initial snapshot
-  try {
-    const drivers = await fetchLiveDrivers({ limit: 250 });
-    sseWrite(res, 'snapshot', { drivers });
-  } catch (_) {
-    sseWrite(res, 'snapshot', { drivers: [] });
-  }
-
-  // Keep-alive ping (some proxies close idle connections)
-  const ping = setInterval(() => {
-    try { res.write(`event: ping\ndata: {}\n\n`); } catch (_) {}
-  }, 25000);
-
-  const client = { res, role: v.payload.role, uid: Number(v.payload.uid) };
-  sseClients.add(client);
-  req.on('close', () => {
-    clearInterval(ping);
-    sseClients.delete(client);
-  });
-});
-
-// Passenger: fetch live drivers (polling fallback)
-app.get('/api/passenger/live_drivers', requireTelegram('passenger'), async (req, res) => {
-  try {
-    const drivers = await fetchLiveDrivers({ limit: 250 });
-    return res.json({ ok: true, drivers });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
-
-// Passenger: estimate fare (Bolt-like pre-price)
-app.post('/api/passenger/estimate', requireTelegram('passenger'), async (req, res) => {
-  try {
-    const { pickup_lat, pickup_lon, drop_lat, drop_lon } = req.body || {};
-    if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((x) => typeof x !== 'number')) {
-      return res.status(400).json({ ok: false, error: 'bad_coords' });
-    }
-    const distance_km = Math.round(haversineKm(pickup_lat, pickup_lon, drop_lat, drop_lon) * 100) / 100;
-    const fare = calcFare(distance_km);
-    return res.json({ ok: true, distance_km, fare });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: 'server_error' });
-  }
-});
 
 // ---- Telegram bots (webhook mode)
 const passengerBot = TOKENS.passenger ? new Telegraf(TOKENS.passenger) : null;
@@ -469,17 +314,6 @@ function requireTelegramAny(roles = []) {
 
     return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'invalid_hash' });
   };
-}
-
-
-// ---- Optional debug key middleware (disabled unless DEBUG_KEY is set)
-function requireDebugKey(req, res, next) {
-  if (!DEBUG_KEY) return res.status(404).json({ ok: false, error: 'debug_disabled' });
-  const key = req.query?.debug_key || req.headers['x-debug-key'];
-  if (!key || String(key) !== String(DEBUG_KEY)) {
-    return res.status(401).json({ ok: false, error: 'debug_unauthorized' });
-  }
-  next();
 }
 
 // ---- Driver auth (registration -> login -> driver area)
@@ -1237,6 +1071,127 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
   res.json({ ok: true, rides: q.rows });
 });
 
+// ---- Passenger: nearby drivers for map (Bolt-style live cars)
+// Query params:
+//  - lat, lon: passenger current location
+//  - radius_km: default 3
+// Returns drivers that are (optionally) online, approved, and with fresh last_loc_at.
+app.get('/api/passenger/nearby_drivers', requireTelegram('passenger'), async (req, res) => {
+  try{
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ ok:false, error:'bad_coords' });
+    }
+
+    await ensureDispatchTables();
+    const hasOnline = await driversHaveOnlineCols();
+
+    // Bounding box pre-filter
+    const dLat = radiusKm / 111.0;
+    const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
+    const dLon = radiusKm / (111.0 * cos);
+
+    const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
+
+    const q = await pool.query(
+      `SELECT id, last_lat, last_lon
+         FROM drivers
+        WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+          AND last_lat BETWEEN $1 AND $2
+          AND last_lon BETWEEN $3 AND $4
+          AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
+          AND (status IS NULL OR status = 'approved')
+          ${hasOnline ? "AND is_online = TRUE" : ""}
+        LIMIT 300`,
+      [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
+    );
+
+    const drivers = (q.rows || [])
+      .map(r => {
+        const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
+        return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
+      })
+      .filter(d => d.km <= radiusKm)
+      .sort((a,b) => a.km - b.km)
+      .slice(0, 60);
+
+    return res.json({ ok:true, drivers, radius_km: radiusKm, has_online: hasOnline });
+  }catch(e){
+    console.error('passenger nearby_drivers error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// ---- Debug helpers (no Telegram required) - protected by DEBUG_KEY
+// Use: /api/debug/db_migrate?debug_key=12345
+app.get('/api/debug/db_migrate', async (req, res) => {
+  const key = String(req.query.debug_key || '');
+  const expected = String(process.env.DEBUG_KEY || '');
+  if (!expected || key !== expected) return res.status(401).json({ ok:false, error:'forbidden' });
+  try{
+    await ensureDispatchTables();
+    const hasOnline = await driversHaveOnlineCols();
+    const hasLoc = await driversHaveLocationCols();
+    return res.json({ ok:true, has_online: hasOnline, has_location: hasLoc });
+  }catch(e){
+    console.error('db_migrate debug error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// Use: /api/debug/nearby_drivers?lat=...&lon=...&radius_km=3&debug_key=12345
+app.get('/api/debug/nearby_drivers', async (req, res) => {
+  const key = String(req.query.debug_key || '');
+  const expected = String(process.env.DEBUG_KEY || '');
+  if (!expected || key !== expected) return res.status(401).json({ ok:false, error:'forbidden' });
+  try{
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ ok:false, error:'bad_coords' });
+    }
+
+    await ensureDispatchTables();
+    const hasOnline = await driversHaveOnlineCols();
+
+    const dLat = radiusKm / 111.0;
+    const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
+    const dLon = radiusKm / (111.0 * cos);
+
+    const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
+    const q = await pool.query(
+      `SELECT id, last_lat, last_lon
+         FROM drivers
+        WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+          AND last_lat BETWEEN $1 AND $2
+          AND last_lon BETWEEN $3 AND $4
+          AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
+          AND (status IS NULL OR status = 'approved')
+          ${hasOnline ? "AND is_online = TRUE" : ""}
+        LIMIT 300`,
+      [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
+    );
+
+    const drivers = (q.rows || [])
+      .map(r => {
+        const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
+        return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
+      })
+      .filter(d => d.km <= radiusKm)
+      .sort((a,b) => a.km - b.km)
+      .slice(0, 100);
+
+    return res.json({ ok:true, drivers, radius_km: radiusKm, has_online: hasOnline });
+  }catch(e){
+    console.error('debug nearby_drivers error:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 // ---- Driver: register + upload docs
 app.post(
   '/api/driver/register',
@@ -1314,53 +1269,6 @@ app.post(
     }
   }
 );
-
-// passenger: list nearby ONLINE drivers for map (icons only)
-// Query params:
-//  - lat, lon: passenger current location
-//  - radius_km: default 3
-app.get('/api/passenger/nearby_drivers', requireTelegram('passenger'), async (req, res) => {
-  const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
-  const lat = Number(req.query.lat);
-  const lon = Number(req.query.lon);
-  if (Number.isNaN(lat) || Number.isNaN(lon)) return res.status(400).json({ ok:false, error:'lat/lon required' });
-
-  await ensureDispatchTables();
-  const hasOnline = await driversHaveOnlineCols();
-
-  // Bounding box pre-filter (cheap)
-  const dLat = radiusKm / 111.0;
-  const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
-  const dLon = radiusKm / (111.0 * cos);
-
-  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-
-  const q = await pool.query(
-    `SELECT id, last_lat, last_lon
-       FROM drivers
-      WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-        AND last_lat BETWEEN $1 AND $2
-        AND last_lon BETWEEN $3 AND $4
-        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
-        AND (status IS NULL OR status = 'approved')
-        ${hasOnline ? "AND is_online = TRUE" : ""}
-      LIMIT 300`,
-    [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
-  );
-
-  const drivers = (q.rows || [])
-    .map(r => {
-      const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
-      return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
-    })
-    .filter(d => d.km <= radiusKm)
-    .sort((a,b) => a.km - b.km)
-    .slice(0, 80)
-    .map(d => ({ id: d.id, lat: d.lat, lon: d.lon }));
-
-  return res.json({ ok:true, drivers, radius_km: radiusKm, passenger_location: { lat, lon } });
-});
-
 
 // driver: me
 app.get('/api/driver/me', requireTelegram('driver'), async (req, res) => {
@@ -1481,21 +1389,6 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
       }catch(_){ }
     }
 
-    // Broadcast online/offline (best-effort)
-    if (!want) {
-      broadcastDriverRemove(req.driver.id);
-    } else {
-      if (typeof lat === 'number' && typeof lon === 'number') {
-        broadcastDriverUpsert({
-          id: Number(req.driver.id),
-          lat: Number(lat),
-          lon: Number(lon),
-          updated_at: new Date().toISOString(),
-          online: true
-        });
-      }
-    }
-
     return res.json({ ok:true, applied:true, online: want });
   }catch(e){
     // If columns are missing in this DB, avoid aborting the transaction.
@@ -1537,16 +1430,6 @@ app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession
       );
     }
     await pool.query('COMMIT');
-
-    // Broadcast to passengers/admins (Bolt-like live cars)
-    broadcastDriverUpsert({
-      id: Number(req.driver.id),
-      lat: Number(lat),
-      lon: Number(lon),
-      updated_at: new Date().toISOString(),
-      online: true
-    });
-
     return res.json({ ok:true, applied:true });
   }catch(e){
     try{ await pool.query('ROLLBACK TO SAVEPOINT sp_loc'); }catch{}
