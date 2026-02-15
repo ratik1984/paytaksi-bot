@@ -78,6 +78,7 @@ for (const k of Object.keys(TOKENS)) {
 if (!APP_BASE_URL) console.warn('⚠️ Missing APP_BASE_URL env var');
 
 const COMMISSION_RATE = 0.10;
+const FREE_RIDES_PER_DAY = parseInt(process.env.FREE_RIDES_PER_DAY || '2', 10);
 const BASE_FARE = 3.50;
 const BASE_KM = 3.0;
 const PER_KM_AFTER = 0.40;
@@ -853,19 +854,49 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
   }
 
   const passenger = await upsertUser(req.tgUser, 'passenger');
+const dist = haversineKm(pickup_lat, pickup_lon, drop_lat, drop_lon);
+let fare = calcFare(dist);
 
-  const dist = haversineKm(pickup_lat, pickup_lon, drop_lat, drop_lon);
-  const fare = calcFare(dist);
-  const commission = money2(fare * COMMISSION_RATE);
+// Promo: first N rides per day are free (counts at creation time)
+let isFreeRide = false;
+if (FREE_RIDES_PER_DAY > 0) {
+  await pool.query(
+    `INSERT INTO promo_free_rides (passenger_user_id, promo_date, used_count)
+     VALUES ($1, (NOW() AT TIME ZONE 'Asia/Baku')::date, 0)
+     ON CONFLICT (passenger_user_id, promo_date) DO NOTHING`,
+    [passenger.id]
+  );
+  const cur = await pool.query(
+    `SELECT used_count FROM promo_free_rides
+       WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+    [passenger.id]
+  );
+  const used = (cur.rows[0] && cur.rows[0].used_count) ? cur.rows[0].used_count : 0;
+  if (used < FREE_RIDES_PER_DAY) {
+    isFreeRide = true;
+    fare = 0;
+  }
+}
+
+const commission = money2(fare * COMMISSION_RATE);
 
   const rideQ = await pool.query(
     `INSERT INTO rides
-     (passenger_user_id, pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text, distance_km, fare, commission)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     (passenger_user_id, pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text, distance_km, fare, commission, is_free)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
-    [passenger.id, pickup_lat, pickup_lon, pickup_text || null, drop_lat, drop_lon, drop_text || null, dist, fare, commission]
+    [passenger.id, pickup_lat, pickup_lon, pickup_text || null, drop_lat, drop_lon, drop_text || null, dist, fare, commission, isFreeRide]
   );
   let ride = rideQ.rows[0];
+
+if (isFreeRide) {
+  await pool.query(
+    `UPDATE promo_free_rides
+       SET used_count = used_count + 1
+     WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+    [passenger.id]
+  );
+}
   // Auto-assign to an eligible online driver (best-effort; keeps "searching" if none)
   try{
     await expireOffersOnce(10).catch(()=>{});
