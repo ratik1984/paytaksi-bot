@@ -76,6 +76,12 @@
     /* Leaflet tweaks */
     .leaflet-control-attribution{display:none}
     .leaflet-control-zoom{display:none}
+
+    /* Driver pins */
+    .pin{display:flex;align-items:center;justify-content:center;border-radius:999px;border:2px solid rgba(255,255,255,.9);box-shadow:0 8px 22px rgba(0,0,0,.35)}
+    .pin.me{background:#1bb66a;width:28px;height:28px}
+    .pin.peer{background:#ef4444;width:18px;height:18px;border-color:rgba(255,255,255,.85)}
+
   </style>
 </head>
 <body>
@@ -316,7 +322,10 @@ who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'}
 // ---------------- UI: map + tabs ----------------
 let __map = null;
 let __myMarker = null;
+let __peerLayer = null;
 let __lastGeo = null;
+let __myIcon = null;
+let __peerIcon = null;
 
 function initMap(){
   try{
@@ -333,7 +342,7 @@ function updateMyMarker(geo){
   const lat = Number(__lastGeo.lat), lon = Number(__lastGeo.lon);
   if (!isFinite(lat) || !isFinite(lon)) return;
   const ll = [lat, lon];
-  if (!__myMarker) __myMarker = L.marker(ll).addTo(__map);
+  if (!__myMarker) __myMarker = L.marker(ll, { icon: __myIcon || undefined }).addTo(__map);
   else __myMarker.setLatLng(ll);
 }
 
@@ -522,6 +531,7 @@ async function sendLocationOnce(){
     await api('/api/driver/location', { method:'POST', body: geo });
     setStatus(locStatus, `Yer yeniləndi ✅ (dəqiqlik: ${Math.round(geo.accuracy||0)}m)`);
     updateMyMarker(geo);
+    loadNearbyDrivers();
     return geo;
   }catch(e){
     setStatus(locStatus, 'Yer göndərilə bilmədi: '+(e.data?.error||e.data?.reason||e.message), false);
@@ -569,12 +579,30 @@ async function loadNearby(opts={}){
   }
 }
 
+
+async function loadNearbyDrivers(){
+  try{
+    if (!__map || !__peerLayer || !__lastGeo) return;
+    const qs = new URLSearchParams();
+    qs.set('radius_km', String(getRadiusKm()));
+    const data = await api('/api/driver/nearby_drivers?'+qs.toString());
+    __peerLayer.clearLayers();
+    (data.drivers||[]).forEach((d)=>{
+      const lat = Number(d.lat), lon = Number(d.lon);
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      L.marker([lat, lon], { icon: __peerIcon || undefined, interactive:false }).addTo(__peerLayer);
+    });
+  }catch(_){ /* ignore */ }
+}
+
+
 function startLocationLoop(){
   if (window.__locTimer) return;
   window.__locTimer = setInterval(async ()=>{
     try{
       await sendLocationOnce();
       await loadNearby();
+      await loadNearbyDrivers();
     }catch(_){ }
   }, 10000);
 }
@@ -605,6 +633,7 @@ async function refreshAfterLogin(){
     if (me2.driver?.is_online){
       await sendLocationOnce();
       await loadNearby();
+      await loadNearbyDrivers();
       startLocationLoop();
     } else {
       stopLocationLoop();
@@ -653,7 +682,7 @@ document.getElementById('btnLocHelp').onclick = async ()=>{
 // filters
 if (radiusSel) radiusSel.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
 if (onlyOffersToggle) onlyOffersToggle.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
-if (btnNearbyManual) btnNearbyManual.onclick = async ()=>{ await loadNearby({force:true}); };
+if (btnNearbyManual) btnNearbyManual.onclick = async ()=>{ await loadNearby({force:true}); await loadNearbyDrivers(); };
 
 document.getElementById('btnReg').onclick = async ()=>{
   try{
