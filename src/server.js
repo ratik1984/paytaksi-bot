@@ -12,7 +12,7 @@ import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import http from 'http';
-import { Server as IOServer } from 'socket.io';
+import { Server as SocketIOServer } from 'socket.io';
 
 dotenv.config();
 
@@ -24,6 +24,36 @@ app.use(helmet({ contentSecurityPolicy: false })); // Telegram WebApp needs rela
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// --- Realtime socket layer (Passenger live drivers + ride status) ---
+const httpServer = http.createServer(app);
+const io = new SocketIOServer(httpServer, {
+  cors: { origin: true, methods: ['GET','POST'] },
+});
+const aio = io; // alias for legacy patches (prevents 'aio is not defined')
+
+function ioEmit(event, payload){
+  try { io.emit(event, payload); } catch(_) {}
+}
+
+async function emitRideUpdateById(rideId){
+  try {
+    const { rows } = await pool.query(
+      `SELECT r.*,
+              d.full_name AS driver_name, d.car_model AS driver_car_model, d.car_plate AS driver_car_plate,
+              d.last_lat AS driver_lat, d.last_lon AS driver_lon
+       FROM rides r
+       LEFT JOIN drivers d ON d.id = r.driver_id
+       WHERE r.id = $1`,
+      [rideId]
+    );
+    if (!rows[0]) return;
+    ioEmit('ride:update', rows[0]);
+  } catch(e) {
+    // ignore
+  }
+}
+
 
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
@@ -120,57 +150,7 @@ function calcFare(distanceKm) {
   return money2(BASE_FARE + extra);
 }
 
-// driver: complete (credit driver earnings and allow passenger rating)
-app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession, async (req, res) => {
-  const { ride_id } = req.body || {};
-  const user = await upsertUser(req.tgUser, 'driver');
-  const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
-  const driver = dQ.rows[0];
-  if (!driver) return res.status(400).json({ ok: false, error: 'not_registered' });
-
-  await ensureFinanceTables();
-  await ensureRatingTables();
-
-  const rideQ = await pool.query(`SELECT * FROM rides WHERE id=$1 AND driver_id=$2`, [ride_id, driver.id]);
-  const ride = rideQ.rows[0];
-  if (!ride || ride.status !== 'started') return res.status(409).json({ ok: false, error: 'cannot_complete' });
-
-  const fare = Number(ride.fare || 0);
-  const commission = Number(ride.commission || 0);
-  const isFree = !!ride.is_free;
-
-  // Driver earns fare minus commission (if free ride -> 0)
-  const earning = isFree ? 0 : money2(fare - commission);
-  const newBal = money2(Number(driver.balance) + earning);
-
-  await pool.query('BEGIN');
-  try {
-    await pool.query(`UPDATE rides SET status='completed', updated_at=NOW() WHERE id=$1`, [ride_id]);
-    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, driver.id]);
-
-    // ledger (additive)
-    await pool.query(
-      `INSERT INTO driver_ledger(driver_id, ride_id, amount, type)
-       VALUES ($1,$2,$3,'ride_earning')`,
-      [driver.id, ride_id, earning]
-    ).catch(()=>{});
-
-    await pool.query('COMMIT');
-  } catch (e) {
-    await pool.query('ROLLBACK');
-    throw e;
-  }
-
-  // Realtime passenger update + prompt rating (best-effort)
-  try{
-    emitPassengerUpdate(ride.passenger_user_id, { ride_id: Number(ride_id), status:'completed', ride: { ...ride, status:'completed' }, prompt_rating: true });
-  }catch(_){}
-
-  res.json({ ok: true, earning, commission, new_balance: newBal, blocked: newBal <= DRIVER_BLOCK_AT });
-});
-
-
- {
+async function ensureSchema() {
   const { default: fs } = await import('fs');
   const schema = fs.readFileSync(path.resolve('db/schema.sql'), 'utf8');
   await pool.query(schema);
@@ -355,31 +335,6 @@ function webAppButton(text, url) {
 }
 
 // Unified Telegram sender used across patches (additive).
-
-// ---- Realtime helpers (Socket.IO) ----
-function emitDriverOffer(driverId, payload){
-  try{
-    if (!globalThis.__pt_io) return;
-    const sid = globalThis.__pt_onlineDriverSockets?.get(Number(driverId));
-    if (sid) globalThis.__pt_io.to(sid).emit("new-order", payload);
-  }catch(e){}
-}
-
-function emitPassengerUpdate(passengerUserId, payload){
-  try{
-    if (!globalThis.__pt_io) return;
-    const sid = globalThis.__pt_onlinePassengerSockets?.get(Number(passengerUserId));
-    if (sid) globalThis.__pt_io.to(sid).emit("ride:update", payload);
-  }catch(e){}
-}
-
-function calcEtaMinutesFromKm(km, minMinutes=3){
-  const avgSpeedKmh = 25; // simple heuristic
-  if (!isFinite(km) || km <= 0) return minMinutes;
-  const mins = Math.ceil((km / avgSpeedKmh) * 60);
-  return Math.max(minMinutes, mins);
-}
-
 async function sendTelegramToRole(role, tgId, text, extra = {}) {
   try {
     const bot = role === 'passenger' ? passengerBot : role === 'driver' ? driverBot : role === 'admin' ? adminBot : null;
@@ -625,77 +580,10 @@ async function driversHaveLocationCols(){
   return _driversLocCols;
 }
 
-// --- Rides schema (self-healing)
-// Some deployments start with an empty database. To avoid runtime failures when
-// passenger creates an order, ensure the canonical rides table exists.
-async function ensureRidesTable(){
-  try {
-    // Canonical schema used by current server routes
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS rides (
-        id BIGSERIAL PRIMARY KEY,
-        passenger_user_id BIGINT NOT NULL,
-        driver_user_id BIGINT,
-
-        pickup_lat DOUBLE PRECISION NOT NULL,
-        pickup_lon DOUBLE PRECISION NOT NULL,
-        pickup_text TEXT,
-
-        drop_lat DOUBLE PRECISION NOT NULL,
-        drop_lon DOUBLE PRECISION NOT NULL,
-        drop_text TEXT,
-
-        distance_km DOUBLE PRECISION,
-        duration_min INTEGER,
-        fare NUMERIC(10,2),
-        fare_final NUMERIC(10,2),
-        commission NUMERIC(10,2),
-        is_free BOOLEAN NOT NULL DEFAULT false,
-
-        status TEXT NOT NULL DEFAULT 'searching',
-        offered_driver_id BIGINT,
-        driver_response_deadline TIMESTAMPTZ,
-
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        assigned_at TIMESTAMPTZ,
-        started_at TIMESTAMPTZ,
-        finished_at TIMESTAMPTZ
-      );
-    `);
-
-    // Legacy compatibility columns (best-effort, additive)
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS pickup_lng DOUBLE PRECISION;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_lat DOUBLE PRECISION;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_lng DOUBLE PRECISION;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS pickup_label TEXT;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_label TEXT;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_distance_km DOUBLE PRECISION;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_duration_min INTEGER;`).catch(()=>{});
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_price NUMERIC(10,2);`).catch(()=>{});
-
-    // Daily promo helper table (1 free ride/day) used by /api/passenger/create_ride
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS promo_free_rides (
-        passenger_user_id BIGINT NOT NULL,
-        promo_date DATE NOT NULL,
-        used_count INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (passenger_user_id, promo_date)
-      );
-    `).catch(()=>{});
-  } catch (e) {
-    console.error('ensureRidesTable failed:', e?.message || e);
-  }
-}
-
 async function ensureDispatchTables(){
   // Additive: driver last known location (used for nearest dispatch if available)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;`).catch(()=>{});
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lon DOUBLE PRECISION;`).catch(()=>{});
-  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;`).catch(()=>{});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_is_online ON drivers(is_online);`).catch(()=>{});
-
   // Additive: driver location freshness (optional)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_at TIMESTAMPTZ;`).catch(()=>{});
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_accuracy DOUBLE PRECISION;`).catch(()=>{});
@@ -723,38 +611,6 @@ async function ensureDispatchTables(){
   );`).catch(()=>{});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_offer_attempts_ride ON ride_offer_attempts(ride_id, driver_id);`).catch(()=>{});
 
-
-async function ensureRatingTables(){
-  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS rating_avg NUMERIC(4,2) NOT NULL DEFAULT 5.0;`).catch(()=>{});
-  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS rating_count INT NOT NULL DEFAULT 0;`).catch(()=>{});
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS ride_ratings(
-      id BIGSERIAL PRIMARY KEY,
-      ride_id BIGINT NOT NULL UNIQUE REFERENCES rides(id) ON DELETE CASCADE,
-      passenger_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      driver_id BIGINT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
-      rating INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
-      comment TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `).catch(()=>{});
-}
-
-async function ensureFinanceTables(){
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS driver_ledger(
-      id BIGSERIAL PRIMARY KEY,
-      driver_id BIGINT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
-      ride_id BIGINT REFERENCES rides(id) ON DELETE SET NULL,
-      amount NUMERIC(12,2) NOT NULL,
-      type TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `).catch(()=>{});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_driver_ledger_driver_created ON driver_ledger(driver_id, created_at);`).catch(()=>{});
-}
-
-
 }
 
 function dist2(aLat, aLon, bLat, bLon){
@@ -765,8 +621,6 @@ function dist2(aLat, aLon, bLat, bLon){
 
 async function autoAssignRide(rideId){
   await ensureDispatchTables();
-await ensureRatingTables();
-await ensureFinanceTables();
 startOfferExpiryLoop();
   const client = await pool.connect();
   try{
@@ -800,7 +654,7 @@ startOfferExpiryLoop();
          AND d.balance > $1
          AND NOT EXISTS (SELECT 1 FROM rides r WHERE r.driver_id=d.id AND r.status IN ('assigned','started'))
        ORDER BY d.id ASC`,
-      [DRIVER_BLOCK_AT]
+      [DRIVER_BLOCK_AT, ride.id]
     );
     const drivers = driversQ.rows;
     if (!drivers.length) {
@@ -848,8 +702,6 @@ startOfferExpiryLoop();
       await sendTelegramToRole('driver', chosen.driver_tg_id, msg, {
         ...webAppButton('🚖 Təklifi aç', url)
       });
-      // Realtime push inside WebApp (best-effort)
-      emitDriverOffer(chosen.id, { type:'offer', ride: assignedRide, timeoutSec: OFFER_TIMEOUT_SEC });
     }
 
     return { ride: assignedRide, driver: chosen };
@@ -865,8 +717,6 @@ startOfferExpiryLoop();
 async function ensureOfferTables(){
   // piggy-back on dispatch tables
   await ensureDispatchTables();
-await ensureRatingTables();
-await ensureFinanceTables();
 startOfferExpiryLoop();
 }
 
@@ -1199,17 +1049,8 @@ app.get('/api/places', async (req, res) => {
 
 // ---- Passenger: create ride
 app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req, res) => {
-  try {
-  // Accept both snake_case and camelCase payloads (older frontends used camelCase)
-  const b = req.body || {};
-  const pickup_lat = (typeof b.pickup_lat === 'number') ? b.pickup_lat : b.pickupLat;
-  const pickup_lon = (typeof b.pickup_lon === 'number') ? b.pickup_lon : (typeof b.pickupLng === 'number' ? b.pickupLng : b.pickup_lon);
-  const pickup_text = (typeof b.pickup_text === 'string') ? b.pickup_text : (b.pickupLabel || '');
-  const drop_lat = (typeof b.drop_lat === 'number') ? b.drop_lat : b.dropLat;
-  const drop_lon = (typeof b.drop_lon === 'number') ? b.drop_lon : (typeof b.dropLng === 'number' ? b.dropLng : b.drop_lon);
-  const drop_text = (typeof b.drop_text === 'string') ? b.drop_text : (b.dropLabel || '');
-
-  if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
+  const { pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text } = req.body || {};
+  if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((v) => typeof v !== 'number')) {
     return res.status(400).json({ ok: false, error: 'bad_coords' });
   }
 
@@ -1265,11 +1106,7 @@ if (isFreeRide) {
   }catch(e){
     console.error('autoAssignRide failed (non-fatal):', e?.message || e);
   }
-  return res.json({ ok: true, ride });
-  } catch (e) {
-    console.error('create_ride fatal error:', e?.message || e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
+  res.json({ ok: true, ride });
 });
 
 // passenger: check ride status
@@ -2007,19 +1844,6 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
       }
     } catch (_) {}
 
-    // Realtime passenger status update (best-effort)
-    try{
-      const r = rideQ.rows[0];
-      const etaKmQ = await pool.query(`SELECT d.last_lat, d.last_lon, r.pickup_lat, r.pickup_lon, r.passenger_user_id FROM rides r LEFT JOIN drivers d ON d.id=r.driver_id WHERE r.id=$1`, [ride_id]);
-      const rr = etaKmQ.rows[0];
-      let etaMin = null;
-      if (rr && rr.last_lat!=null && rr.last_lon!=null) {
-        const km = haversineKm(rr.last_lat, rr.last_lon, rr.pickup_lat, rr.pickup_lon);
-        etaMin = calcEtaMinutesFromKm(km, 3);
-      }
-      emitPassengerUpdate(r.passenger_user_id, { ride_id: r.id, status: 'assigned', eta_min: etaMin, ride: r });
-    }catch(_){ }
-
     return res.json({ ok: true, ride: rideQ.rows[0] });
   } catch (e) {
     try { await pool.query('ROLLBACK'); } catch (_) {}
@@ -2066,7 +1890,6 @@ app.post('/api/driver/start', requireTelegram('driver'), requireDriverSession, a
     [ride_id, driver?.id]
   );
   if (!q.rows[0]) return res.status(409).json({ ok: false, error: 'cannot_start' });
-  try{ emitPassengerUpdate(q.rows[0].passenger_user_id, { ride_id: q.rows[0].id, status:'started', ride: q.rows[0] }); }catch(_){ }
   res.json({ ok: true, ride: q.rows[0] });
 });
 
@@ -2097,49 +1920,6 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
 
   res.json({ ok: true, commission, new_balance: newBal, blocked: newBal <= DRIVER_BLOCK_AT });
 });
-
-
-// passenger: rate driver after ride completion
-app.post('/api/passenger/rate', requireTelegram('passenger'), async (req, res) => {
-  try{
-    await ensureRatingTables();
-    const { ride_id, rating, comment } = req.body || {};
-    const r = Number(rating);
-    if (!ride_id || !Number.isFinite(r) || r<1 || r>5) return res.status(400).json({ ok:false, error:'bad_rating' });
-
-    const passenger = await upsertUser(req.tgUser, 'passenger');
-    const rideQ = await pool.query(`SELECT * FROM rides WHERE id=$1 AND passenger_user_id=$2`, [ride_id, passenger.id]);
-    const ride = rideQ.rows[0];
-    if (!ride || ride.status !== 'completed') return res.status(409).json({ ok:false, error:'cannot_rate' });
-    if (!ride.driver_id) return res.status(409).json({ ok:false, error:'no_driver' });
-
-    await pool.query('BEGIN');
-    try{
-      await pool.query(
-        `INSERT INTO ride_ratings(ride_id, passenger_user_id, driver_id, rating, comment)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (ride_id) DO UPDATE SET rating=EXCLUDED.rating, comment=EXCLUDED.comment`,
-        [ride_id, passenger.id, ride.driver_id, r, (comment||null)]
-      );
-
-      // update driver rating aggregates
-      const agg = await pool.query(`SELECT AVG(rating)::numeric(4,2) AS avg, COUNT(*)::int AS cnt FROM ride_ratings WHERE driver_id=$1`, [ride.driver_id]);
-      const avg = agg.rows[0]?.avg ?? 5.0;
-      const cnt = agg.rows[0]?.cnt ?? 0;
-      await pool.query(`UPDATE drivers SET rating_avg=$2, rating_count=$3 WHERE id=$1`, [ride.driver_id, avg, cnt]);
-      await pool.query('COMMIT');
-    }catch(e){
-      await pool.query('ROLLBACK');
-      throw e;
-    }
-
-    return res.json({ ok:true });
-  }catch(e){
-    console.error('rate', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
 
 // driver: topup request (manual approval)
 app.post('/api/driver/topup_request', requireTelegram('driver'), requireDriverSession, async (req, res) => {
@@ -2340,6 +2120,30 @@ app.post('/api/admin/topup_review', adminAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+
+
+// Admin live snapshot (drivers + active rides) for realtime map
+app.get('/api/admin/live_snapshot', adminAuth, async (req, res) => {
+  try {
+    const driversQ = await pool.query(
+      `SELECT id, full_name, car_model, car_plate, status, last_lat, last_lon, updated_at
+       FROM drivers
+       WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+       ORDER BY updated_at DESC
+       LIMIT 300`
+    );
+    const ridesQ = await pool.query(
+      `SELECT r.*
+       FROM rides r
+       WHERE UPPER(r.status) IN ('SEARCHING','ASSIGNED','ARRIVING','STARTED')
+       ORDER BY r.created_at DESC
+       LIMIT 300`
+    );
+    return res.json({ ok:true, drivers: driversQ.rows, rides: ridesQ.rows });
+  } catch(e){
+    return res.status(500).json({ ok:false, error:'snapshot_failed' });
+  }
+});
 app.get('/api/admin/rides', adminAuth, async (req, res) => {
   const q = await pool.query(
     `SELECT r.*, pu.tg_id as passenger_tg_id, pu.first_name as passenger_name,
@@ -2353,93 +2157,15 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
   res.json({ ok: true, rides: q.rows });
 });
 
-// ---- Start server (HTTP + Socket.IO)
+// ---- Start server
 const PORT = process.env.PORT || 10000;
 
-// Create HTTP server so Socket.IO works reliably in Telegram WebView
-const httpServer = http.createServer(app);
-const io = new IOServer(httpServer, {
-  cors: { origin: "*" }
-});
-
-// In-memory online sockets (best-effort)
-const onlineDriverSockets = new Map(); // driver_id -> socket.id
-const onlinePassengerSockets = new Map(); // passenger_user_id -> socket.id
-
-globalThis.__pt_io = io;
-globalThis.__pt_onlineDriverSockets = onlineDriverSockets;
-globalThis.__pt_onlinePassengerSockets = onlinePassengerSockets;
-
-aio.on("connection", (socket) => {
-  socket.on("driver-online", async (data) => {
-    try {
-      const driverId = Number(data?.driverId);
-      if (!driverId) return;
-      onlineDriverSockets.set(driverId, socket.id);
-      // Persist online + location to DB (best-effort)
-      await ensureDispatchTables();
-      const lat = (data?.lat!=null) ? Number(data.lat) : null;
-      const lng = (data?.lng!=null) ? Number(data.lng) : null;
-      await pool.query(
-        `UPDATE drivers SET is_online=true,
-            last_lat = COALESCE($2,last_lat),
-            last_lon = COALESCE($3,last_lon),
-            last_loc_at = NOW()
-         WHERE id=$1`,
-        [driverId, lat, lng]
-      ).catch(()=>{});
-      if (lat!=null && lng!=null) {
-        io.emit("driver-update", { driverId, lat, lng });
-      }
-    } catch(e){}
-  });
-
-  socket.on("driver-location", async (data) => {
-    try {
-      const driverId = Number(data?.driverId);
-      const lat = Number(data?.lat);
-      const lng = Number(data?.lng);
-      if (!driverId || !isFinite(lat) || !isFinite(lng)) return;
-      onlineDriverSockets.set(driverId, socket.id);
-      await ensureDispatchTables();
-      await pool.query(
-        `UPDATE drivers SET last_lat=$2, last_lon=$3, last_loc_at=NOW(), last_loc_accuracy=COALESCE($4,last_loc_accuracy)
-         WHERE id=$1`,
-        [driverId, lat, lng, data?.acc!=null?Number(data.acc):null]
-      ).catch(()=>{});
-      io.emit("driver-update", { driverId, lat, lng });
-    } catch(e){}
-  });
-
-  socket.on("passenger-online", (data) => {
-    try{
-      const pid = Number(data?.passengerId);
-      if(!pid) return;
-      onlinePassengerSockets.set(pid, socket.id);
-    }catch(e){}
-  });
-
-  socket.on("disconnect", async () => {
-    // cleanup maps (best-effort)
-    for (const [k,v] of onlineDriverSockets.entries()) {
-      if (v === socket.id) onlineDriverSockets.delete(k);
-    }
-    for (const [k,v] of onlinePassengerSockets.entries()) {
-      if (v === socket.id) onlinePassengerSockets.delete(k);
-    }
-  });
-});
-
 await ensureSchema();
-await ensureRidesTable();
 // Additive: ensure optional tables/columns for dispatch are present.
 await ensureDispatchTables();
-await ensureRatingTables();
-await ensureFinanceTables();
 startOfferExpiryLoop();
 
-httpServer.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`PayTaksi server listening on :${PORT}`);
   console.log(`Webhook secret path: /webhook/${WEBHOOK_SECRET}/...`);
 });
-
