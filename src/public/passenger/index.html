@@ -12,7 +12,7 @@
   <script>window.__ROLE__='passenger';</script>
   <script src="/assets/common.js"></script>
 
-  <!-- Leaflet (map). If CDN is blocked in Telegram WebView, we auto-fallback to "no-map" mode. -->
+  <!-- Leaflet map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -105,18 +105,6 @@
 
     /* keep room for Telegram bottom bar / phone nav */
     .safePad{ height:12px; }
-
-    /* Tiny debug strip (only shown on errors) */
-    .debugStrip{position:fixed;left:10px;right:10px;top:10px;background:rgba(0,0,0,.82);color:#fff;padding:10px 12px;border-radius:14px;font-size:12px;display:none;z-index:10000;white-space:pre-wrap}
-
-    /* Fallback (no-map) UI */
-    #fallback{display:none;margin-top:10px}
-    #fallback input{width:100%;padding:14px;border-radius:18px;border:1px solid var(--line);font-size:16px;box-sizing:border-box}
-    .small{font-size:12px;color:var(--muted);margin-top:8px}
-    .sugs{margin-top:8px}
-    .sug{padding:10px 12px;border:1px solid var(--line);border-radius:14px;margin:8px 0;background:#fafafa;cursor:pointer}
-    .sug strong{display:block}
-    .sug span{display:block;font-size:12px;color:var(--muted);margin-top:2px}
   </style>
 </head>
 
@@ -147,18 +135,6 @@
 
       <div id="status" class="status">GPS oxunur…</div>
 
-      <!-- Fallback UI (shown automatically if map fails to load in Telegram WebView) -->
-      <div id="fallback">
-        <div class="hint" style="margin-top:8px">
-          Xəritə yüklənmədi. Bu rejimdə sifarişi xəritəsiz verə bilərsiniz.
-        </div>
-        <div style="margin-top:10px">
-          <input id="pickupTxt" placeholder="Mövcud yeriniz (məs: 28 May, Nərimanov...)" autocomplete="off" />
-          <div class="sugs" id="pickupSuggestions"></div>
-        </div>
-        <div class="small">İpucu: əvvəlcə mövcud yeri seçin, sonra təyinatı seçin.</div>
-      </div>
-
       <div id="driverCard" class="driverCard" style="display:none">
         <div class="dTop">
           <div>
@@ -178,8 +154,6 @@
       <div class="safePad"></div>
     </div>
   </div>
-
-  <div class="debugStrip" id="debugStrip"></div>
 
   <!-- Legacy panel is intentionally kept in codebase; this screen focuses on a stable Bolt-like flow. -->
 
@@ -215,48 +189,16 @@
       return 2*R*Math.asin(Math.sqrt(q));
     }
 
-    // --- Debug / error visibility (helps when Telegram WebView hides console)
-    const debugStrip = $('debugStrip');
-    function showDebug(msg){
-      if (!debugStrip) return;
-      debugStrip.style.display = 'block';
-      debugStrip.textContent = String(msg).slice(0, 1200);
-    }
-    window.addEventListener('error', (e)=>{
-      showDebug('JS error: ' + (e?.message || e));
-    });
-    window.addEventListener('unhandledrejection', (e)=>{
-      showDebug('Promise error: ' + (e?.reason?.message || e?.reason || e));
-    });
-
-    // --- Map (can fail if Leaflet CDN blocked). If it fails, we fallback to "no-map" mode.
+    // --- Map
     let map, pickMarker, dropMarker, drvMarker, line;
-    let mapReady = false;
-    function enableFallbackMode(reason){
-      try{ document.getElementById('mapWrap').style.display='none'; }catch(_){ }
-      try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
-      setStatus('Xəritə yüklənmədi. Manual rejim aktivdir.', false);
-      showDebug('Map disabled. Reason: ' + (reason||'unknown'));
-      mapReady = false;
-    }
     function initMap(){
-      try{
-        if (!window.L || typeof window.L.map !== 'function') {
-          enableFallbackMode('Leaflet yüklənmədi (CDN blok ola bilər)');
-          return;
-        }
-        map = L.map('map', { zoomControl:false, attributionControl:false });
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-        map.setView([40.4093, 49.8671], 12); // Baku
-        mapReady = true;
-      } catch(err){
-        enableFallbackMode(err?.message || String(err));
-      }
+      map = L.map('map', { zoomControl:false, attributionControl:false });
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+      map.setView([40.4093, 49.8671], 12); // Baku
     }
     initMap();
 
     function setMarker(which, lat, lon){
-      if (!mapReady) return;
       if (!isFinite(lat)||!isFinite(lon)) return;
       const ll=[lat,lon];
       if (which==='pick'){
@@ -271,7 +213,6 @@
       }
     }
     function drawLine(p1, p2){
-      if (!mapReady) return;
       try{ if (line){ map.removeLayer(line); line=null; } }catch(_){ }
       if (!p1 || !p2) return;
       line = L.polyline([[p1.lat,p1.lon],[p2.lat,p2.lon]], { weight: 5, opacity: 0.9 }).addTo(map);
@@ -310,13 +251,7 @@
         const finish = (val)=>{ if(done) return; done = true; try{ clearTimeout(hardTmr); }catch(_){ } resolve(val); };
         // Hard fallback: some WebViews never call either callback unless user taps.
         const hardTmr = setTimeout(()=>{
-          // Some WebViews never return geolocation until the user interacts.
-          if (!mapReady) {
-            try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
-            setStatus('GPS alınmadı. Mövcud yeri yazıb seçin (manual rejim).', false);
-          } else {
-            setStatus('GPS icazəsi üçün "hədəf" düyməsinə toxunun (manual rejim).', false);
-          }
+          setStatus('GPS icazəsi üçün "hədəf" düyməsinə toxunun (manual rejim).', false);
           finish(null);
         }, 8000);
 
@@ -335,12 +270,7 @@
           validate();
           finish(pickup);
         }, (err)=>{
-          if (!mapReady) {
-            try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
-            setStatus('GPS icazəsi yoxdur. Mövcud yeri yazıb seçin (manual rejim).', false);
-          } else {
-            setStatus('GPS icazəsi yoxdur. Telefonun Location icazəsini aktiv edin.', false);
-          }
+          setStatus('GPS icazəsi yoxdur. Telefonun Location icazəsini aktiv edin.', false);
           validate();
           finish(null);
         }, { enableHighAccuracy:true, timeout:12000, maximumAge:10000 });
@@ -348,9 +278,7 @@
     }
 
     function validate(){
-      // Creating a ride needs BOTH pickup + destination
-      btnCreate.disabled = !(pickup && drop) || !!activeRide;
-    }
+      btnCreate.disabled = !(drop);}
 
     // --- Suggestions
     function showSuggest(items){
@@ -405,58 +333,6 @@
         showSuggest(items);
       }, 250);
     });
-
-    // --- Fallback pickup suggestions (used when map is unavailable or GPS denied)
-    const pickupTxt = $('pickupTxt');
-    const pickupSug = $('pickupSuggestions');
-    let pickTmr = null;
-    function showPickupSuggest(items){
-      if (!pickupSug) return;
-      if (!items || !items.length){ pickupSug.innerHTML=''; return; }
-      pickupSug.innerHTML = items.slice(0,6).map((it, idx)=>{
-        const title = (it.title||'').replace(/</g,'&lt;');
-        const sub = (it.subtitle||'').replace(/</g,'&lt;');
-        return `<div class="sug" data-idx="${idx}"><strong>${title}</strong><span>${sub}</span></div>`;
-      }).join('');
-      pickupSug.onclick = (e)=>{
-        const el = e.target.closest('.sug');
-        if (!el) return;
-        const idx = Number(el.dataset.idx);
-        const it = items[idx];
-        if (!it) return;
-        pickup = { lat: Number(it.lat), lon: Number(it.lon), text: it.title };
-        if (pickupTxt) pickupTxt.value = it.title;
-        pickupSug.innerHTML='';
-        // If map exists, reflect markers; otherwise just proceed
-        setMarker('pick', pickup.lat, pickup.lon);
-        if (drop) drawLine(pickup, drop);
-        setStatus('Mövcud yer seçildi', true);
-        validate();
-      };
-    }
-    async function loadPickupSuggestions(q){
-      try{
-        const url = new URL('/api/places', location.origin);
-        url.searchParams.set('q', q);
-        const r = await fetch(url.toString());
-        const j = await r.json();
-        if (j?.ok) return j.items || [];
-      }catch(_){ }
-      return [];
-    }
-    if (pickupTxt){
-      pickupTxt.addEventListener('input', ()=>{
-        const q = pickupTxt.value.trim();
-        pickup = null;
-        validate();
-        clearTimeout(pickTmr);
-        if (q.length < 3){ showPickupSuggest([]); return; }
-        pickTmr = setTimeout(async ()=>{
-          const items = await loadPickupSuggestions(q);
-          showPickupSuggest(items);
-        }, 250);
-      });
-    }
     document.addEventListener('click', (e)=>{
       if (!destSuggest.contains(e.target) && e.target !== destInput){
         destSuggest.style.display='none';
