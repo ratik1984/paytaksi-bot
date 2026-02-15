@@ -829,7 +829,20 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
+    `SELECT 
+        r.*,
+        d.id as driver_id,
+        d.phone as driver_phone,
+        d.car_make as driver_car_make,
+        d.car_model as driver_car_model,
+        d.car_year as driver_car_year,
+        d.car_color as driver_car_color,
+        d.plate as driver_plate,
+        d.last_lat as driver_last_lat,
+        d.last_lon as driver_last_lon,
+        u.tg_id as driver_tg_id,
+        u.first_name as driver_first_name,
+        u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
@@ -1325,7 +1338,7 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), requireDriverSessio
   res.json({ ok: true, offers: offersQ.rows||[], rides: q.rows });
 });
 
-// driver: accept ride (assign to this driver)
+// driver: accept ride
 app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
@@ -1335,54 +1348,15 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  // Prevent accepting while already on an active ride
-  const activeQ = await pool.query(
-    `SELECT COUNT(*)::int c FROM rides WHERE driver_id=$1 AND status IN ('assigned','started')`,
-    [driver.id]
-  );
-  if (activeQ.rows[0].c > 0) return res.status(409).json({ ok:false, error:'driver_busy' });
-
-  // Atomically assign if still available
-  const q = await pool.query(
-    `UPDATE rides
-     SET driver_id=$1,
-         status='assigned',
-         offered_driver_id=NULL,
-         offer_expires_at=NULL,
-         updated_at=NOW()
-     WHERE id=$2
-       AND status='searching'
-       AND (offered_driver_id IS NULL OR offered_driver_id=$1)
-       AND (offer_expires_at IS NULL OR offer_expires_at > NOW())
+  const rideQ = await pool.query(
+    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
+     WHERE id=$2 AND status='searching'
      RETURNING *`,
     [driver.id, ride_id]
   );
-  if (!q.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
-
+  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
   await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
-
-  // Best-effort: notify passenger via Telegram bot (if available)
-  try {
-    const pQ = await pool.query(
-      `SELECT u.tg_id passenger_tg_id FROM rides r
-       JOIN users u ON u.id=r.passenger_user_id
-       WHERE r.id=$1`,
-      [ride_id]
-    );
-    const passengerTgId = pQ.rows?.[0]?.passenger_tg_id;
-    if (passengerTgId && PASSENGER_BOT_TOKEN) {
-      const passengerBot = new Telegraf(PASSENGER_BOT_TOKEN);
-      const link = `${APP_BASE_URL}/public/passenger/?ride=${ride_id}`;
-      await passengerBot.telegram.sendMessage(
-        passengerTgId,
-        `✅ Sürücü sifarişi qəbul etdi. Sifarişiniz aktivdir.`,
-        Markup.inlineKeyboard([Markup.button.webApp('Sifarişi aç', link)])
-      );
-      passengerBot.stop?.();
-    }
-  } catch (_) {}
-
-  return res.json({ ok: true, ride: q.rows[0] });
+  res.json({ ok: true, ride: rideQ.rows[0] });
 });
 
 
