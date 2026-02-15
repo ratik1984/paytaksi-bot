@@ -12,7 +12,6 @@ import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import http from 'http';
-import { Server as SocketIOServer } from 'socket.io';
 
 dotenv.config();
 
@@ -24,35 +23,6 @@ app.use(helmet({ contentSecurityPolicy: false })); // Telegram WebApp needs rela
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
-
-// --- Realtime socket layer (Passenger live drivers + ride status) ---
-const httpServer = http.createServer(app);
-const io = new SocketIOServer(httpServer, {
-  cors: { origin: true, methods: ['GET','POST'] },
-});
-
-function ioEmit(event, payload){
-  try { io.emit(event, payload); } catch(_) {}
-}
-
-async function emitRideUpdateById(rideId){
-  try {
-    const { rows } = await pool.query(
-      `SELECT r.*,
-              d.full_name AS driver_name, d.car_model AS driver_car_model, d.car_plate AS driver_car_plate,
-              d.last_lat AS driver_lat, d.last_lon AS driver_lon
-       FROM rides r
-       LEFT JOIN drivers d ON d.id = r.driver_id
-       WHERE r.id = $1`,
-      [rideId]
-    );
-    if (!rows[0]) return;
-    ioEmit('ride:update', rows[0]);
-  } catch(e) {
-    // ignore
-  }
-}
-
 
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
@@ -1060,21 +1030,28 @@ let fare = calcFare(dist);
 // Promo: first N rides per day are free (counts at creation time)
 let isFreeRide = false;
 if (FREE_RIDES_PER_DAY > 0) {
-  await pool.query(
-    `INSERT INTO promo_free_rides (passenger_user_id, promo_date, used_count)
-     VALUES ($1, (NOW() AT TIME ZONE 'Asia/Baku')::date, 0)
-     ON CONFLICT (passenger_user_id, promo_date) DO NOTHING`,
-    [passenger.id]
-  );
-  const cur = await pool.query(
-    `SELECT used_count FROM promo_free_rides
-       WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
-    [passenger.id]
-  );
-  const used = (cur.rows[0] && cur.rows[0].used_count) ? cur.rows[0].used_count : 0;
-  if (used < FREE_RIDES_PER_DAY) {
-    isFreeRide = true;
-    fare = 0;
+  // NOTE: Some deployments may not have `promo_free_rides` created yet.
+  // If the table is missing, we treat promo as disabled (non-fatal).
+  try {
+    await pool.query(
+      `INSERT INTO promo_free_rides (passenger_user_id, promo_date, used_count)
+       VALUES ($1, (NOW() AT TIME ZONE 'Asia/Baku')::date, 0)
+       ON CONFLICT (passenger_user_id, promo_date) DO NOTHING`,
+      [passenger.id]
+    );
+    const cur = await pool.query(
+      `SELECT used_count FROM promo_free_rides
+         WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+      [passenger.id]
+    );
+    const used = (cur.rows[0] && cur.rows[0].used_count) ? cur.rows[0].used_count : 0;
+    if (used < FREE_RIDES_PER_DAY) {
+      isFreeRide = true;
+      fare = 0;
+    }
+  } catch (e) {
+    // 42P01 = undefined_table (PostgreSQL)
+    if (e && e.code !== '42P01') throw e;
   }
 }
 
@@ -1090,12 +1067,16 @@ const commission = money2(fare * COMMISSION_RATE);
   let ride = rideQ.rows[0];
 
 if (isFreeRide) {
-  await pool.query(
-    `UPDATE promo_free_rides
-       SET used_count = used_count + 1
-     WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
-    [passenger.id]
-  );
+  try {
+    await pool.query(
+      `UPDATE promo_free_rides
+         SET used_count = used_count + 1
+       WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+      [passenger.id]
+    );
+  } catch (e) {
+    if (e && e.code !== '42P01') throw e;
+  }
 }
   // Auto-assign to an eligible online driver (best-effort; keeps "searching" if none)
   try{
@@ -2119,30 +2100,6 @@ app.post('/api/admin/topup_review', adminAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-
-
-// Admin live snapshot (drivers + active rides) for realtime map
-app.get('/api/admin/live_snapshot', adminAuth, async (req, res) => {
-  try {
-    const driversQ = await pool.query(
-      `SELECT id, full_name, car_model, car_plate, status, last_lat, last_lon, updated_at
-       FROM drivers
-       WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-       ORDER BY updated_at DESC
-       LIMIT 300`
-    );
-    const ridesQ = await pool.query(
-      `SELECT r.*
-       FROM rides r
-       WHERE UPPER(r.status) IN ('SEARCHING','ASSIGNED','ARRIVING','STARTED')
-       ORDER BY r.created_at DESC
-       LIMIT 300`
-    );
-    return res.json({ ok:true, drivers: driversQ.rows, rides: ridesQ.rows });
-  } catch(e){
-    return res.status(500).json({ ok:false, error:'snapshot_failed' });
-  }
-});
 app.get('/api/admin/rides', adminAuth, async (req, res) => {
   const q = await pool.query(
     `SELECT r.*, pu.tg_id as passenger_tg_id, pu.first_name as passenger_name,
