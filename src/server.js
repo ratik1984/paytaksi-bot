@@ -802,48 +802,73 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
   try {
-    const ride_id = Number(req.body?.ride_id);
-    if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
-
-    // Map Telegram user to our internal passenger user id
     const passenger = await upsertUser(req.tgUser, 'passenger');
+    const ride_id = req.body?.ride_id ? Number(req.body.ride_id) : null;
 
-    // Fetch ride (ensure ownership)
-    const rideQ = await pool.query(
-      `SELECT r.*, u.tg_id AS driver_tg_id
-       FROM rides r
-       LEFT JOIN drivers d ON d.id = r.driver_id
-       LEFT JOIN users u ON u.id = d.user_id
-       WHERE r.id=$1 AND r.passenger_user_id=$2`,
-      [ride_id, passenger.id]
-    );
-    const ride = rideQ.rows[0];
-    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    // Support both explicit ride_id and "cancel my active ride".
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    if (!['searching', 'assigned'].includes(String(ride.status))) {
-      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+      // Lock the most recent matching ride row.
+      const rideQ = await client.query(
+        `SELECT r.*,
+                du.tg_id as driver_tg_id
+         FROM rides r
+         LEFT JOIN drivers d ON d.id = r.driver_id
+         LEFT JOIN users du ON du.id = d.user_id
+         WHERE r.passenger_user_id=$1
+           AND ($2::bigint IS NULL OR r.id=$2)
+         ORDER BY r.id DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [passenger.id, ride_id]
+      );
+
+      const ride = rideQ.rows[0];
+      if (!ride) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ ok: false, error: 'ride_not_found' });
+      }
+
+      if (!['searching', 'assigned'].includes(ride.status)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
+      }
+
+      await client.query(
+        `UPDATE rides
+            SET status='cancelled', updated_at=NOW()
+          WHERE id=$1`,
+        [ride.id]
+      );
+
+      // Audit (additive)
+      await client.query(
+        `INSERT INTO ride_cancellations (ride_id, actor_role, actor_tg_id, reason)
+         VALUES ($1,'passenger',$2,$3)`,
+        [ride.id, Number(req.tgUser.id), (req.body?.reason || null)]
+      );
+
+      await client.query('COMMIT');
+
+      // Best-effort notify driver after commit
+      if (ride.driver_tg_id) {
+        try {
+          await sendTelegramToRole('driver', Number(ride.driver_tg_id), `❌ Sifariş ləğv edildi (#${ride.id}).`);
+        } catch (e) {}
+      }
+
+      return res.json({ ok: true, ride_id: ride.id });
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_e) {}
+      console.error('cancel_ride failed:', e);
+      return res.status(500).json({ ok: false, error: 'server_error' });
+    } finally {
+      client.release();
     }
-
-    const upd = await pool.query(
-      `UPDATE rides
-       SET status='cancelled', cancelled_at=NOW()
-       WHERE id=$1 AND passenger_user_id=$2 AND status IN ('searching','assigned')
-       RETURNING id`,
-      [ride_id, passenger.id]
-    );
-    if (upd.rowCount === 0) {
-      return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
-    }
-
-    if (ride.driver_tg_id) {
-      try {
-        await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`);
-      } catch {}
-    }
-
-    return res.json({ ok: true });
   } catch (e) {
-    console.error('cancel_ride failed:', e);
+    console.error(e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
@@ -851,7 +876,19 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
+    `SELECT r.*,
+            d.id as driver_id,
+            d.phone as driver_phone,
+            d.car_make as driver_car_make,
+            d.car_model as driver_car_model,
+            d.car_year as driver_car_year,
+            d.car_color as driver_car_color,
+            d.plate as driver_plate,
+            d.last_lat as driver_last_lat,
+            d.last_lon as driver_last_lon,
+            u.tg_id as driver_tg_id,
+            u.first_name as driver_first_name,
+            u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
@@ -1357,15 +1394,72 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  const rideQ = await pool.query(
-    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
-     WHERE id=$2 AND status='searching'
-     RETURNING *`,
-    [driver.id, ride_id]
+  if (!ride_id) return res.status(400).json({ ok:false, error:'ride_id_required' });
+
+  // Prevent accepting if driver is already busy
+  const busyQ = await pool.query(
+    `SELECT id FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
+    [driver.id]
   );
-  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
-  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
-  res.json({ ok: true, ride: rideQ.rows[0] });
+  if (busyQ.rows[0]) return res.status(409).json({ ok:false, error:'driver_busy' });
+
+  const client = await pool.connect();
+  try{
+    await client.query('BEGIN');
+
+    // Lock ride
+    const rQ = await client.query(
+      `SELECT * FROM rides
+       WHERE id=$1
+       FOR UPDATE`,
+      [ride_id]
+    );
+    const ride = rQ.rows[0];
+    if (!ride) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok:false, error:'ride_not_found' });
+    }
+
+    // Already assigned to this driver -> ok
+    if (ride.status === 'assigned' && Number(ride.driver_id) === Number(driver.id)) {
+      await client.query('COMMIT');
+      await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+      return res.json({ ok:true, ride });
+    }
+
+    // Only accept if it is currently offered to this driver and not expired.
+    const offeredOk = (ride.status === 'searching'
+      && Number(ride.offered_driver_id) === Number(driver.id)
+      && (!ride.offer_expires_at || new Date(ride.offer_expires_at) > new Date()));
+
+    if (!offeredOk) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok:false, error:'not_offered_to_you' });
+    }
+
+    const upd = await client.query(
+      `UPDATE rides
+         SET driver_id=$2,
+             status='assigned',
+             offered_driver_id=NULL,
+             offer_expires_at=NULL,
+             updated_at=NOW()
+       WHERE id=$1
+       RETURNING *`,
+      [ride_id, driver.id]
+    );
+
+    await client.query('COMMIT');
+
+    await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+    return res.json({ ok:true, ride: upd.rows[0] });
+  }catch(e){
+    try{ await client.query('ROLLBACK'); }catch(_e){}
+    console.error('driver accept failed:', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }finally{
+    client.release();
+  }
 });
 
 
