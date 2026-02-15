@@ -1201,6 +1201,83 @@ app.get('/api/driver/nearby_rides', requireTelegram('driver'), requireDriverSess
   return res.json({ ok:true, rides, radius_km: radiusKm, only_offers: onlyOffers, driver_location: { lat: driverLat, lon: driverLon } });
 });
 
+// driver: list nearby ONLINE drivers for map (icons only)
+// Returns other drivers (not the current one) within radius_km of driver's last location.
+// Query params:
+//  - radius_km: 1/3/5 ... (default 3)
+//  - force: 1 => allow one-time fetch even if driver is offline
+app.get('/api/driver/nearby_drivers', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+  const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
+  const force = String(req.query.force || '') === '1';
+
+  await ensureDispatchTables();
+  const hasOnline = await driversHaveOnlineCols();
+
+  // Get caller location + online state
+  let dRow;
+  if (hasOnline) {
+    const dQ = await pool.query(
+      `SELECT is_online, last_lat, last_lon, last_loc_at FROM drivers WHERE id=$1`,
+      [req.driver.id]
+    );
+    dRow = dQ.rows[0];
+    const isOnline = !!dRow?.is_online;
+    if (!isOnline && !force) return res.json({ ok:true, drivers: [], offline:true });
+  } else {
+    const dQ = await pool.query(`SELECT last_lat, last_lon, last_loc_at FROM drivers WHERE id=$1`, [req.driver.id]);
+    dRow = dQ.rows[0];
+  }
+
+  if (!dRow || dRow.last_lat === null || dRow.last_lon === null) {
+    return res.json({ ok:true, drivers: [], note:'no_location' });
+  }
+
+  const lat = Number(dRow.last_lat);
+  const lon = Number(dRow.last_lon);
+
+  // Bounding box pre-filter (cheap)
+  const dLat = radiusKm / 111.0;
+  const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
+  const dLon = radiusKm / (111.0 * cos);
+
+  // Only show reasonably fresh driver pings (avoid stale icons)
+  // last_loc_at is additive; if NULL, we still allow but many installs will have it.
+  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
+
+  const q = await pool.query(
+    `SELECT id, last_lat, last_lon
+       FROM drivers
+      WHERE id <> $1
+        AND last_lat IS NOT NULL AND last_lon IS NOT NULL
+        AND last_lat BETWEEN $2 AND $3
+        AND last_lon BETWEEN $4 AND $5
+        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($6 || ' minutes')::interval)
+        AND (status IS NULL OR status = 'approved')
+        ${hasOnline ? "AND is_online = TRUE" : ""}
+      LIMIT 200`,
+    [
+      req.driver.id,
+      lat - dLat,
+      lat + dLat,
+      lon - dLon,
+      lon + dLon,
+      String(freshnessMin)
+    ]
+  );
+
+  const drivers = (q.rows || [])
+    .map(r => {
+      const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
+      return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
+    })
+    .filter(d => d.km <= radiusKm)
+    .sort((a,b) => a.km - b.km)
+    .slice(0, 50)
+    .map(d => ({ id: d.id, lat: d.lat, lon: d.lon }));
+
+  return res.json({ ok:true, drivers, radius_km: radiusKm, driver_location: { lat, lon } });
+});
+
 // driver: logout (revoke current token)
 app.post('/api/driver/logout', requireTelegram('driver'), async (req, res) => {
   try{
