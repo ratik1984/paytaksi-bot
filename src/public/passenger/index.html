@@ -49,6 +49,7 @@
     button.danger{background:var(--danger);color:#fff}
     .row{display:grid;grid-template-columns:1fr;gap:10px}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
     .list{margin-top:8px}
     .item{padding:10px;border:1px solid rgba(0,0,0,.12);border-radius:14px;margin:6px 0;background:#fff}
     .progress{height:8px;border-radius:999px;background:rgba(0,0,0,.08);overflow:hidden}
@@ -117,11 +118,12 @@
           <b id="drvName2">—</b>
           <div class="muted" id="drvCar2">—</div>
           <div class="muted" id="drvEta2">—</div>
-          <div class="two" style="margin-top:10px">
-            <button id="btnCall2" class="secondary" type="button">Zəng</button>
+          <div class="three" style="margin-top:10px">
+            <button id="btnCall2" class="secondary" type="button">📞 Zəng</button>
+            <button id="btnMsg2" class="secondary" type="button">💬 Mesaj</button>
             <button id="btnCancelRide3" class="danger" type="button">Ləğv et</button>
           </div>
-          <div class="muted" style="margin-top:8px">Qeyd: Zəng düyməsi demo rejimdədir (telefon DB-də saxlananda aktivləşəcək).</div>
+          <div class="muted" style="margin-top:8px" id="drvContactHint">—</div>
         </div>
       </div>
 
@@ -215,8 +217,10 @@
   const drvCar2 = document.getElementById('drvCar2');
   const drvEta2 = document.getElementById('drvEta2');
   const btnCall2 = document.getElementById('btnCall2');
+  const btnMsg2 = document.getElementById('btnMsg2');
   const btnCancelRide2 = document.getElementById('btnCancelRide2');
   const btnCancelRide3 = document.getElementById('btnCancelRide3');
+  const drvContactHint = document.getElementById('drvContactHint');
 
   if (who2) who2.textContent = u ? `👤 ${u.first_name||''} (@${u.username||'-'})` : 'Local dev mode';
 
@@ -413,7 +417,29 @@
     if (pickup && m) m.setView([pickup.lat, pickup.lon], 16);
   };
 
-  if (btnCall2) btnCall2.onclick = ()=> alert('Demo: telefon DB-də saxlananda burada zəng açılacaq.');
+  let __lastAssignedRide = null;
+
+  function openDriverCall(ride){
+    const phone = String(ride?.driver_phone||'').trim();
+    if (!phone) return alert('Sürücünün telefon nömrəsi sistemdə yoxdur. (Admin paneldən sürücüyə telefon əlavə edin)');
+    try{ location.href = `tel:${phone}`; }catch(_){ alert(phone); }
+  }
+
+  function openDriverMsg(ride){
+    // Prefer tg user id; fallback to username
+    const tgId = ride?.driver_tg_id ? String(ride.driver_tg_id) : '';
+    const uname = ride?.driver_username ? String(ride.driver_username) : '';
+    if (tgId) {
+      try{ location.href = `tg://user?id=${encodeURIComponent(tgId)}`; return; }catch(_){ }
+    }
+    if (uname) {
+      try{ location.href = `https://t.me/${encodeURIComponent(uname)}`; return; }catch(_){ }
+    }
+    alert('Sürücüyə mesaj üçün Telegram məlumatı tapılmadı.');
+  }
+
+  if (btnCall2) btnCall2.onclick = ()=> openDriverCall(__lastAssignedRide);
+  if (btnMsg2) btnMsg2.onclick = ()=> openDriverMsg(__lastAssignedRide);
 
   // ---- Cancel modal helpers
   const cancelBack = document.getElementById('cancelBack');
@@ -508,6 +534,7 @@
 
     if (String(r.status) === 'assigned' || String(r.status) === 'started'){
       uiShowState('assigned');
+      __lastAssignedRide = r;
       const name = (r.driver_first_name || '').trim() || 'Sürücü';
       const plate = (r.driver_plate || '').trim();
       const car = [r.driver_car_make, r.driver_car_model].filter(Boolean).join(' ');
@@ -515,12 +542,22 @@
       drvName2 && (drvName2.textContent = name + (plate ? ` • ${plate}` : ''));
       drvCar2 && (drvCar2.textContent = [car, color, r.driver_car_year].filter(Boolean).join(' • ') || '—');
 
+      // Contact hint
+      const phone = String(r.driver_phone||'').trim();
+      const tgHint = r.driver_username ? `@${r.driver_username}` : (r.driver_tg_id ? `tg:${r.driver_tg_id}` : '');
+      if (drvContactHint) {
+        drvContactHint.textContent = phone ? `Telefon: ${phone} ${tgHint ? '• ' + tgHint : ''}` : (tgHint ? `Telegram: ${tgHint}` : 'Əlaqə məlumatı yoxdur');
+      }
+
       const dlat = Number(r.driver_last_lat);
       const dlon = Number(r.driver_last_lon);
       if (isFinite(dlat) && isFinite(dlon) && pickup){
         setDriverMarker(dlat, dlon);
         const eta = computeEtaMin(dlat, dlon, pickup.lat, pickup.lon);
         drvEta2 && (drvEta2.textContent = eta ? `${eta} dəqiqəyə çatır` : '—');
+
+        // Bolt-like: show driver -> pickup line when assigned
+        try{ drawLine([[dlat, dlon],[pickup.lat, pickup.lon]]); }catch(_){ }
       } else {
         drvEta2 && (drvEta2.textContent = '—');
       }

@@ -840,6 +840,7 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
         d.plate as driver_plate,
         d.last_lat as driver_last_lat,
         d.last_lon as driver_last_lon,
+        d.last_loc_at as driver_last_loc_at,
         u.tg_id as driver_tg_id,
         u.first_name as driver_first_name,
         u.username as driver_username
@@ -848,7 +849,7 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
      LEFT JOIN users u ON u.id = d.user_id
      WHERE r.passenger_user_id=$1
      ORDER BY r.id DESC
-     LIMIT 10`,
+     LIMIT 20`,
     [passenger.id]
   );
   res.json({ ok: true, rides: q.rows });
@@ -1348,15 +1349,68 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  const rideQ = await pool.query(
-    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
-     WHERE id=$2 AND status='searching'
-     RETURNING *`,
-    [driver.id, ride_id]
-  );
-  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
-  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
-  res.json({ ok: true, ride: rideQ.rows[0] });
+  // Accept flow:
+  // - If ride is already offered to this driver (offered_driver_id = driver.id) -> assign it.
+  // - If ride is not offered to anyone (offered_driver_id IS NULL) -> allow first-come assignment.
+  // This makes passenger immediately see assigned driver (Bolt-like behavior).
+  await pool.query('BEGIN');
+  try{
+    const cur = await pool.query(
+      `SELECT id, status, offered_driver_id, offer_expires_at
+       FROM rides
+       WHERE id=$1
+       FOR UPDATE`,
+      [ride_id]
+    );
+    const r = cur.rows[0];
+    if (!r || String(r.status) !== 'searching') {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok:false, error:'ride_not_available' });
+    }
+
+    const offeredId = r.offered_driver_id == null ? null : Number(r.offered_driver_id);
+    if (offeredId !== null && offeredId !== Number(driver.id)) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok:false, error:'ride_not_offered_to_you' });
+    }
+
+    // If offer exists and is expired, treat it as free.
+    const exp = r.offer_expires_at ? new Date(r.offer_expires_at).getTime() : 0;
+    if (offeredId !== null && exp && exp < Date.now()) {
+      // free the offer for assignment
+      await pool.query(
+        `UPDATE rides SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW() WHERE id=$1`,
+        [ride_id]
+      );
+    }
+
+    const rideQ = await pool.query(
+      `UPDATE rides
+       SET driver_id=$2,
+           status='assigned',
+           offered_driver_id=NULL,
+           offer_expires_at=NULL,
+           updated_at=NOW()
+       WHERE id=$1 AND status='searching' AND (offered_driver_id IS NULL OR offered_driver_id=$2)
+       RETURNING *`,
+      [ride_id, driver.id]
+    );
+    if (!rideQ.rows[0]) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok:false, error:'ride_not_available' });
+    }
+
+    await pool.query('COMMIT');
+    await pool.query(
+      `INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`,
+      [ride_id, driver.id]
+    ).catch(()=>{});
+    return res.json({ ok:true, ride: rideQ.rows[0] });
+  }catch(e){
+    try{ await pool.query('ROLLBACK'); }catch{}
+    console.error('driver/accept failed', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
 });
 
 
@@ -1418,7 +1472,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
   await pool.query('BEGIN');
   try {
     await pool.query(`UPDATE rides SET status='completed', updated_at=NOW() WHERE id=$1`, [ride_id]);
-    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, driver.id]);
+    await pool.query(`UPDATE drivers SET balance=$1, status=CASE WHEN status='approved' AND $1 <= ${DRIVER_BLOCK_AT} THEN 'blocked' ELSE status END WHERE id=$2`, [newBal, driver.id]);
     await pool.query('COMMIT');
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -1542,8 +1596,20 @@ app.post('/api/admin/driver_balance', adminAuth, async (req, res) => {
 
     const newBal = money2(Number(d.balance) + a);
     await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, d.id]);
+
+    // Auto-toggle driver status based on balance threshold (keeps UX consistent)
+    // If balance <= block limit and driver was approved -> blocked
+    // If driver was blocked due to balance and balance is now above limit -> approved
+    let newStatus = d.status;
+    const nb = Number(newBal);
+    if (d.status === 'approved' && nb <= DRIVER_BLOCK_AT) newStatus = 'blocked';
+    if (d.status === 'blocked' && nb > DRIVER_BLOCK_AT) newStatus = 'approved';
+    if (newStatus !== d.status) {
+      await pool.query(`UPDATE drivers SET status=$1 WHERE id=$2`, [newStatus, d.id]);
+    }
+
     await pool.query('COMMIT');
-    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, note: note || null });
+    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, status: newStatus, note: note || null });
   } catch (e) {
     await pool.query('ROLLBACK');
     return res.status(400).json({ ok: false, error: String(e.message || e) });
