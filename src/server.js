@@ -80,6 +80,7 @@ if (!APP_BASE_URL) console.warn('⚠️ Missing APP_BASE_URL env var');
 const COMMISSION_RATE = 0.10;
 const FREE_RIDES_PER_DAY = parseInt(process.env.FREE_RIDES_PER_DAY || '2', 10);
 const BASE_FARE = 3.50;
+const DISPATCH_RADIUS_KM = Number(process.env.DISPATCH_RADIUS_KM || 3);
 const BASE_KM = 3.0;
 const PER_KM_AFTER = 0.40;
 const DRIVER_BLOCK_AT = -10.0;
@@ -467,11 +468,24 @@ startOfferExpiryLoop();
     let chosen = null;
 
     if (withLoc.length) {
-      chosen = withLoc.reduce((best, d) => {
+      // Filter by radius (Bolt-style: only offer to nearby drivers)
+      const radiusKm = Math.max(0.1, Math.min(50, Number(DISPATCH_RADIUS_KM || 3)));
+      const candidates = withLoc
+        .map(d => {
+          const km = haversineKm(ride.pickup_lat, ride.pickup_lon, Number(d.last_lat), Number(d.last_lon));
+          return { ...d, _km: km };
+        })
+        .filter(d => isFinite(d._km) && d._km <= radiusKm);
+
+      if (!candidates.length) {
+        // No nearby drivers; keep ride searching.
+        await client.query('COMMIT');
+        return null;
+      }
+
+      chosen = candidates.reduce((best, d) => {
         if (!best) return d;
-        const bd = dist2(ride.pickup_lat, ride.pickup_lon, best.last_lat, best.last_lon);
-        const dd = dist2(ride.pickup_lat, ride.pickup_lon, d.last_lat, d.last_lon);
-        return dd < bd ? d : best;
+        return d._km < best._km ? d : best;
       }, null);
     } else {
       const stQ = await client.query('SELECT last_driver_id FROM dispatch_state WHERE id=1 FOR UPDATE');
@@ -846,6 +860,53 @@ app.get('/api/places', async (req, res) => {
   }
 });
 
+
+// Passenger: nearby drivers around pickup (Bolt-style live cars)
+app.get('/api/passenger/nearby_drivers', requireTelegram('passenger'), async (req, res) => {
+  const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || DISPATCH_RADIUS_KM || 3)));
+  const lat = Number(req.query.lat);
+  const lon = Number(req.query.lon);
+  if (!isFinite(lat) || !isFinite(lon)) return res.status(400).json({ ok:false, error:'bad_coords' });
+
+  await ensureDispatchTables();
+  const hasLoc = await driversHaveLocationCols();
+  const hasOnline = await driversHaveOnlineCols();
+  if (!hasLoc) return res.json({ ok:true, drivers: [], note:'no_location_cols' });
+
+  // Bounding box pre-filter (cheap)
+  const dLat = radiusKm / 111.0;
+  const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
+  const dLon = radiusKm / (111.0 * cos);
+
+  // Only show reasonably fresh driver pings (avoid stale icons)
+  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
+
+  const q = await pool.query(
+    `SELECT id, last_lat, last_lon
+       FROM drivers
+      WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+        AND last_lat BETWEEN $1 AND $2
+        AND last_lon BETWEEN $3 AND $4
+        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
+        AND (status IS NULL OR status = 'approved')
+        ${hasOnline ? "AND is_online = TRUE" : ""}
+      LIMIT 200`,
+    [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
+  );
+
+  const drivers = (q.rows || [])
+    .map(r => {
+      const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
+      return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km };
+    })
+    .filter(d => isFinite(d.km) && d.km <= radiusKm)
+    .sort((a,b) => a.km - b.km)
+    .slice(0, 60)
+    .map(d => ({ id: d.id, lat: d.lat, lon: d.lon }));
+
+  return res.json({ ok:true, drivers, radius_km: radiusKm });
+});
+
 // ---- Passenger: create ride
 app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req, res) => {
   const { pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text } = req.body || {};
@@ -1055,60 +1116,6 @@ app.get('/api/active_ride', requireTelegramAny(['passenger','driver']), handleAc
 app.get('/active-ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
 app.get('/active-ride/', requireTelegramAny(['passenger','driver']), handleActiveRide);
 app.get('/active_ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
-
-
-
-// passenger: list nearby ONLINE drivers for map (icons only)
-// Query params:
-//  - lat, lon: passenger reference point (pickup or map center)
-//  - radius_km: (default 3; max 50)
-app.get('/api/passenger/nearby_drivers', requireTelegram('passenger'), async (req, res) => {
-  try{
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
-    if (!isFinite(lat) || !isFinite(lon)) return res.status(400).json({ ok:false, error:'bad_coords' });
-
-    const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
-    await ensureDispatchTables();
-
-    const hasOnline = await driversHaveOnlineCols();
-
-    // Bounding box pre-filter
-    const dLat = radiusKm / 111.0;
-    const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
-    const dLon = radiusKm / (111.0 * cos);
-
-    const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-
-    const q = await pool.query(
-      `SELECT id, last_lat, last_lon
-         FROM drivers
-        WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-          AND last_lat BETWEEN $1 AND $2
-          AND last_lon BETWEEN $3 AND $4
-          AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
-          AND (status IS NULL OR status = 'approved')
-          ${hasOnline ? "AND is_online = TRUE" : ""}
-        LIMIT 200`,
-      [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
-    );
-
-    const drivers = (q.rows || [])
-      .map(r => {
-        const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
-        return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km };
-      })
-      .filter(d => d.km <= radiusKm)
-      .sort((a,b) => a.km - b.km)
-      .slice(0, 50)
-      .map(d => ({ id: d.id, lat: d.lat, lon: d.lon }));
-
-    return res.json({ ok:true, drivers, radius_km: radiusKm });
-  }catch(e){
-    console.error('passenger nearby_drivers failed:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
 
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');

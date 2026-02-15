@@ -1,0 +1,28 @@
+PAYTAKSI BACKEND PATCH (Bolt-style live drivers + 3km dispatch radius)
+
+1) Apply SQL (PostgreSQL):
+   Run: db/patches/20260215_passenger_nearby_drivers.sql
+
+2) Replace file:
+   Copy src/server.js from this ZIP into your project (same path).
+   (No deletions elsewhere.)
+
+3) Optional ENV (defaults are already correct):
+   DISPATCH_RADIUS_KM=3
+   DRIVER_LOC_FRESH_MIN=3
+
+New API:
+- Passenger live drivers:
+  GET /api/passenger/nearby_drivers?lat=40.40&lon=49.86&radius_km=3
+  Requires passenger Telegram auth (same as other passenger endpoints).
+
+Dispatcher change:
+- autoAssignRide now only offers to drivers within DISPATCH_RADIUS_KM km of pickup.
+  If no nearby drivers, ride stays 'searching'.
+
+Frontend hook:
+- Call /api/passenger/nearby_drivers every 3 seconds using pickup coords
+  to draw moving car markers.
+
+Notes:
+- Drivers must keep sending /api/driver/location and be is_online=TRUE.
