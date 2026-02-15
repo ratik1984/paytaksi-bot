@@ -29,8 +29,8 @@
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
     html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
-    #wrap { position: fixed; inset: 0; overflow: hidden; background: #0b1020; }
-    #map { position: fixed; inset: 0; z-index: 1; background: #0b1020; }
+    #wrap{ position:fixed; inset:0; display:flex; flex-direction:column; }
+    #map{ position:absolute; inset:0; }
     .topBtns{
       position:absolute; top:14px; left:14px; right:14px;
       display:flex; justify-content:space-between; pointer-events:none;
@@ -267,8 +267,41 @@
           enableFallbackMode('Leaflet yüklənmədi (CDN blok ola bilər)');
           return;
         }
-        map = L.map('map', { zoomControl:false, attributionControl:false });
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        map = L.map('map', { zoomControl:false, attributionControl:false });        // Tile layers (Telegram webview bəzən OSM-u bloklayır → fallback)
+        const tileSources = [
+          { url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", opts: { maxZoom: 19 } },
+          { url: "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", opts: { maxZoom: 20 } },
+          { url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", opts: { maxZoom: 20, subdomains: "abcd" } },
+        ];
+
+        let tileIdx = 0;
+        let tileErr = 0;
+        let tileLayer = null;
+
+        function mountTiles(i) {
+          try { if (tileLayer) tileLayer.remove(); } catch (e) {}
+          tileIdx = i;
+          tileErr = 0;
+          const src = tileSources[Math.min(tileIdx, tileSources.length - 1)];
+          tileLayer = L.tileLayer(src.url, {
+            ...src.opts,
+            crossOrigin: true,
+            updateWhenZooming: false,
+            updateWhenIdle: true,
+          });
+          tileLayer.on("tileerror", () => {
+            tileErr++;
+            // çox error olduqda növbəti serverə keç
+            if (tileErr >= 8 && tileIdx < tileSources.length - 1) {
+              statusEl.textContent = "Xəritə serveri dəyişdirilir…";
+              mountTiles(tileIdx + 1);
+            }
+          });
+          tileLayer.addTo(map);
+        }
+
+        mountTiles(0);
+
         map.setView([40.4093, 49.8671], 12); // Baku
         mapReady = true;
         // expose for add-on scripts (live cars)
