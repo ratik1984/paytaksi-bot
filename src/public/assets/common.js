@@ -46,6 +46,8 @@ async function api(path, {method='GET', body=null, headers={}}={}){
   } catch {}
 const res = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : null });
   const data = await res.json().catch(()=>({ok:false,error:'bad_json'}));
-  if (!res.ok) throw Object.assign(new Error(data.error||'http_error'), { status: res.status, data });
+  if (!res.ok) {
+    return { ok: false, error: (data && data.error) ? data.error : 'http_error', status: res.status, data };
+  }
   return data;
 }
