@@ -4,10 +4,340 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PayTaksi - Sərnişin</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js">
+
+// =========================
+// Premium Passenger UI (Bolt-like) - additive layer
+// Keeps legacy panel intact (in #legacyWrap) and reuses existing API helpers.
+// =========================
+const who2 = document.getElementById('who2');
+const dest2 = document.getElementById('dest2');
+const dest2List = document.getElementById('dest2List');
+const btnRequest2 = document.getElementById('btnRequest2');
+const req2Status = document.getElementById('req2Status');
+const stateIdle = document.getElementById('stateIdle');
+const stateSearching = document.getElementById('stateSearching');
+const stateAssigned = document.getElementById('stateAssigned');
+const offerBar = document.getElementById('offerBar');
+const searchSub = document.getElementById('searchSub');
+const btnCancelRide2 = document.getElementById('btnCancelRide2');
+const btnCancelRide3 = document.getElementById('btnCancelRide3');
+const btnLegacy = document.getElementById('btnLegacy');
+const legacyWrap = document.getElementById('legacyWrap');
+const btnCloseLegacy = document.getElementById('btnCloseLegacy');
+const btnMenu = document.getElementById('btnMenu');
+const btnCenter = document.getElementById('btnCenter');
+
+const drvName2 = document.getElementById('drvName2');
+const drvCar2 = document.getElementById('drvCar2');
+const drvEta2 = document.getElementById('drvEta2');
+const btnCall2 = document.getElementById('btnCall2');
+
+if (who2) who2.textContent = u ? `👤 ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
+
+// --- Leaflet map
+let __pMap = null;
+let __pPickMarker = null;
+let __pDropMarker = null;
+let __pDrvMarker = null;
+let __pLine = null;
+
+function initPassengerMap(){
+  try{
+    if (__pMap) return;
+    __pMap = L.map('map', { zoomControl:false, attributionControl:false });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(__pMap);
+    __pMap.setView([40.4093, 49.8671], 12); // Baku default
+  }catch(_){}
+}
+initPassengerMap();
+
+function setPickMarker(lat, lon){
+  if (!__pMap || !isFinite(lat) || !isFinite(lon)) return;
+  if (!__pPickMarker) __pPickMarker = L.marker([lat, lon]).addTo(__pMap);
+  __pPickMarker.setLatLng([lat, lon]);
+}
+function setDropMarker(lat, lon){
+  if (!__pMap || !isFinite(lat) || !isFinite(lon)) return;
+  if (!__pDropMarker) __pDropMarker = L.marker([lat, lon]).addTo(__pMap);
+  __pDropMarker.setLatLng([lat, lon]);
+}
+function setDrvMarker(lat, lon){
+  if (!__pMap || !isFinite(lat) || !isFinite(lon)) return;
+  if (!__pDrvMarker) __pDrvMarker = L.marker([lat, lon]).addTo(__pMap);
+  __pDrvMarker.setLatLng([lat, lon]);
+}
+function drawLine(points){
+  try{
+    if (!__pMap) return;
+    if (__pLine){ __pMap.removeLayer(__pLine); __pLine = null; }
+    if (!points || points.length < 2) return;
+    __pLine = L.polyline(points, { weight: 5, opacity: 0.9 }).addTo(__pMap);
+    __pMap.fitBounds(__pLine.getBounds(), { padding:[40,40] });
+  }catch(_){}
+}
+function centerOnPickup(){
+  if (!__pMap || !pickup) return;
+  __pMap.setView([pickup.lat, pickup.lon], 16);
+}
+
+if (btnCenter) btnCenter.onclick = centerOnPickup;
+if (btnMenu) btnMenu.onclick = ()=>{ legacyWrap.style.display='block'; };
+if (btnLegacy) btnLegacy.onclick = ()=>{ legacyWrap.style.display='block'; };
+if (btnCloseLegacy) btnCloseLegacy.onclick = ()=>{ legacyWrap.style.display='none'; };
+
+// --- New destination autocomplete (reuses loadSuggestions)
+let tmr2 = null;
+if (dest2){
+  dest2.addEventListener('input', (e)=>{
+    clearTimeout(tmr2);
+    const q = e.target.value.trim();
+    if (q.length < 3){ dest2List.innerHTML=''; drop=null; updateFareUI(); return; }
+    tmr2 = setTimeout(()=>{
+      loadSuggestions(q, dest2List, (it)=>{
+        drop = { lat: it.lat, lon: it.lon, text: it.title };
+        dest2.value = it.title;
+        dest2List.innerHTML='';
+        try{ setDropMarker(drop.lat, drop.lon); }catch(_){}
+        updateFareUI();
+        if (pickup) drawLine([[pickup.lat,pickup.lon],[drop.lat,drop.lon]]);
+      });
+    }, 250);
+  });
+}
+
+function uiShowState(name){
+  if (!stateIdle) return;
+  stateIdle.style.display = (name === 'idle') ? '' : 'none';
+  stateSearching.style.display = (name === 'searching') ? '' : 'none';
+  stateAssigned.style.display = (name === 'assigned') ? '' : 'none';
+}
+
+// --- Ensure pickup via GPS immediately for premium UI
+async function ensurePickup(){
+  if (pickup) return pickup;
+  return new Promise((resolve)=>{
+    navigator.geolocation.getCurrentPosition(async (pos)=>{
+      pickup = { lat: pos.coords.latitude, lon: pos.coords.longitude, text: 'Mənim yerim' };
+      try{ setPickMarker(pickup.lat, pickup.lon); __pMap && __pMap.setView([pickup.lat,pickup.lon], 16); }catch(_){}
+      // Reverse geocode (best-effort)
+      try{
+        const url = new URL('/api/reverse', location.origin);
+        url.searchParams.set('lat', pickup.lat);
+        url.searchParams.set('lon', pickup.lon);
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.ok && (j.name || j.display_name)) pickup.text = j.name || j.display_name;
+      }catch(_){}
+      resolve(pickup);
+    }, ()=>{
+      resolve(null);
+    }, { enableHighAccuracy:true, timeout:12000 });
+  });
+}
+
+async function createRideFromPremium(){
+  const pck = await ensurePickup();
+  if (!pck){ req2Status.textContent = 'GPS icazəsi yoxdur. Telefonun Location icazəsini aktiv edin.'; return; }
+  if (!drop){ req2Status.textContent = 'Təyinat seçin.'; return; }
+  try{
+    req2Status.textContent = 'Sifariş yaradılır…';
+    const data = await api('/api/passenger/create_ride',{method:'POST',body:{
+      pickup_lat: pck.lat, pickup_lon: pck.lon, pickup_text: pck.text,
+      drop_lat: drop.lat, drop_lon: drop.lon, drop_text: drop.text,
+      distance_km: lastDistanceKm
+    }});
+    req2Status.textContent = `Sifariş #${data.ride.id} yaradıldı.`;
+    uiShowState('searching');
+    // Legacy refresh too
+    try{ await loadRides(); }catch(_){}
+  }catch(e){
+    req2Status.textContent = 'Xəta: '+(e.data?.reason||e.data?.error||e.message);
+  }
+}
+
+if (btnRequest2) btnRequest2.onclick = createRideFromPremium;
+
+// --- Active ride polling (shows Bolt-like states)
+let __activeRideId = null;
+
+function computeEtaMin(driverLat, driverLon){
+  try{
+    if (!pickup || !isFinite(driverLat) || !isFinite(driverLon)) return null;
+    const km = haversineKm({lat:driverLat, lon:driverLon}, {lat:pickup.lat, lon:pickup.lon});
+    const speedKmh = 25; // rough city speed
+    const min = Math.max(1, Math.round((km / speedKmh) * 60));
+    return min;
+  }catch(_){ return null; }
+}
+
+function renderActiveRide(r){
+  if (!r){
+    __activeRideId = null;
+    offerBar && (offerBar.style.width = '0%');
+    uiShowState('idle');
+    if (__pDrvMarker){ try{ __pMap.removeLayer(__pDrvMarker); }catch(_){ } __pDrvMarker=null; }
+    return;
+  }
+
+  __activeRideId = Number(r.id);
+  // markers
+  if (pickup){ setPickMarker(pickup.lat, pickup.lon); }
+  if (r.pickup_lat && r.pickup_lon){ setPickMarker(Number(r.pickup_lat), Number(r.pickup_lon)); }
+  if (r.drop_lat && r.drop_lon){ setDropMarker(Number(r.drop_lat), Number(r.drop_lon)); }
+  const linePts = [];
+  if (r.pickup_lat && r.pickup_lon) linePts.push([Number(r.pickup_lat), Number(r.pickup_lon)]);
+  if (r.drop_lat && r.drop_lon) linePts.push([Number(r.drop_lat), Number(r.drop_lon)]);
+  if (linePts.length===2) drawLine(linePts);
+
+  // searching with offer
+  if (String(r.status) === 'searching'){
+    uiShowState('searching');
+    const hasOffer = r.offered_driver_id != null;
+    if (hasOffer){
+      const exp = r.offer_expires_at ? new Date(r.offer_expires_at).getTime() : 0;
+      const now = Date.now();
+      const total = Math.max(1, Number(20) * 1000);
+      let pct = 0;
+      if (exp) pct = Math.max(0, Math.min(1, (exp - now) / total));
+      offerBar && (offerBar.style.width = Math.round(pct*100) + '%');
+      searchSub && (searchSub.textContent = 'Sürücünün sifarişi təsdiqləməsi gözlənilir');
+    } else {
+      offerBar && (offerBar.style.width = '0%');
+      searchSub && (searchSub.textContent = 'Yaxın sürücülərə təklif göndərilir…');
+    }
+    return;
+  }
+
+  if (String(r.status) === 'assigned' || String(r.status) === 'started'){
+    uiShowState('assigned');
+    const name = (r.driver_first_name || '').trim() || 'Sürücü';
+    const plate = (r.driver_plate || '').trim();
+    const car = [r.driver_car_make, r.driver_car_model].filter(Boolean).join(' ');
+    const color = (r.driver_car_color || '').trim();
+    drvName2 && (drvName2.textContent = name + (plate ? ` • ${plate}` : ''));
+    drvCar2 && (drvCar2.textContent = [car, color, r.driver_car_year].filter(Boolean).join(' • ') || '—');
+
+    // driver last loc -> eta
+    const dlat = Number(r.driver_last_lat), dlon = Number(r.driver_last_lon);
+    if (isFinite(dlat) && isFinite(dlon)){
+      setDrvMarker(dlat, dlon);
+      const eta = computeEtaMin(dlat, dlon);
+      drvEta2 && (drvEta2.textContent = eta ? `${eta} dəqiqəyə çatır` : '—');
+    } else {
+      drvEta2 && (drvEta2.textContent = '—');
+    }
+    offerBar && (offerBar.style.width = '100%');
+    return;
+  }
+
+  // completed/cancelled -> back to idle
+  uiShowState('idle');
+}
+
+async function pollActiveRide(){
+  try{
+    const data = await api('/api/passenger/my_rides');
+    const rides = data.rides || [];
+    const active = rides.find(r => !['completed','cancelled'].includes(String(r.status)));
+    renderActiveRide(active || null);
+  }catch(_){}
+}
+
+if (btnCancelRide2) btnCancelRide2.onclick = async ()=>{
+  if (!__activeRideId) return;
+  try{
+    // Prefer modal (legacy) for reason
+    let reason = null;
+    try{
+      const data = await api('/api/passenger/my_rides');
+      const rides = data.rides || [];
+      const ride = rides.find(x=>Number(x.id)===Number(__activeRideId));
+      if (ride) reason = await openCancelModal(ride);
+    }catch(_){}
+    await api('/api/passenger/cancel_ride', { method:'POST', body:{ ride_id: __activeRideId, reason }});
+    await pollActiveRide();
+    try{ await loadRides(); }catch(_){}
+  }catch(e){
+    alert('Ləğv xətası: '+(e.data?.error||e.data?.reason||e.message));
+  }
+};
+if (btnCancelRide3) btnCancelRide3.onclick = btnCancelRide2 ? btnCancelRide2.onclick : null;
+if (btnCall2) btnCall2.onclick = ()=> alert('Demo: telefon nömrəsi DB-də saxlananda burada zəng açılacaq.');
+
+setInterval(pollActiveRide, 4000);
+setTimeout(async ()=>{
+  try{ await ensurePickup(); }catch(_){}
+  try{ await pollActiveRide(); }catch(_){}
+}, 600);
+
+
+</script>
   <script src="../assets/common.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:14px}
+
+    :root{
+      --bg:#ffffff;
+      --panel:rgba(255,255,255,.92);
+      --text:#0b0f14;
+      --muted:#5b6572;
+      --line:rgba(0,0,0,.10);
+      --accent:#1bb66a;
+      --danger:#b00020;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:var(--bg);color:var(--text);overflow:hidden}
+
+    /* Map */
+    #mapWrap{position:relative;height:62vh;min-height:340px;background:#f3f4f6}
+    #map{position:absolute;inset:0}
+    .mapBtn{position:absolute;width:46px;height:46px;border-radius:999px;border:1px solid var(--line);background:var(--panel);backdrop-filter: blur(10px);color:var(--text);display:flex;align-items:center;justify-content:center;font-size:20px}
+    .mapBtn:active{transform:scale(.98)}
+    #btnMenu{left:14px;top:14px}
+    #btnCenter{right:14px;top:14px}
+
+    /* Bottom sheet */
+    #sheet{position:absolute;left:0;right:0;bottom:0;height:48vh;
+      background:var(--panel);
+      border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid var(--line);
+      overflow:hidden;
+      box-shadow: 0 -18px 60px rgba(0,0,0,.12);
+    }
+    #sheetHandle{width:44px;height:5px;border-radius:999px;background:rgba(0,0,0,.20);margin:10px auto 8px auto}
+    #sheetInner{height:100%;overflow:auto;padding:0 14px 92px 14px}
+
+    .title{font-weight:900;font-size:22px;margin:6px 2px}
+    .muted{color:var(--muted);font-size:13px}
+    .card{border:1px solid var(--line);border-radius:18px;padding:12px;margin:10px 0;background:#fff}
+    input,button,select{width:100%;padding:12px;border-radius:14px;border:1px solid var(--line);font-size:16px;background:#fff}
+    button{border:none;background:var(--accent);color:#08110b;font-weight:900}
+    button.secondary{background:#111;color:#fff}
+    button.danger{background:var(--danger);color:#fff}
+    .row{display:grid;grid-template-columns:1fr;gap:10px}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .list{margin-top:8px}
+    .item{padding:10px;border:1px solid rgba(0,0,0,.12);border-radius:14px;margin:6px 0;background:#fff}
+    .progress{height:8px;border-radius:999px;background:rgba(0,0,0,.08);overflow:hidden}
+    .progress > div{height:100%;width:0%;;background:var(--accent);transition:width .3s ease}
+
+    /* bottom nav */
+    #bottomNav{position:absolute;left:0;right:0;bottom:0;height:64px;background:var(--panel);border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(3,1fr);padding:6px 8px;gap:6px}
+    .navBtn{border:none;background:transparent;color:var(--muted);border-radius:14px;font-size:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+    .navBtn.active{background:rgba(27,182,106,.12);color:var(--text)}
+    .navIco{font-size:18px;line-height:18px}
+
+    /* legacy wrapper */
+    #legacyWrap{position:fixed;inset:0;background:#fff;overflow:auto;display:none;z-index:99999;padding:14px}
+    #legacyWrap .closeLegacy{position:fixed;right:14px;top:14px;z-index:100000}
+    .leaflet-control-attribution{display:none}
+    .leaflet-control-zoom{display:none}
+
+    /* Legacy styles below */
+    #legacyWrap{font-family:system-ui,Segoe UI,Roboto,Arial}
+
     .card{border:1px solid #e6e6e6;border-radius:14px;padding:12px;margin:10px 0}
     input,button,select{width:100%;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:16px}
     button{border:none;background:#111;color:#fff}
@@ -28,7 +358,70 @@
   </style>
 </head>
 <body>
-  <h2>PayTaksi 🚕</h2>
+  <div id="mapWrap">
+    <div id="map"></div>
+    <button class="mapBtn" id="btnMenu" type="button">☰</button>
+    <button class="mapBtn" id="btnCenter" type="button">🎯</button>
+  </div>
+
+  <div id="sheet">
+    <div id="sheetHandle"></div>
+    <div id="sheetInner">
+      <div class="muted" id="who2" style="margin:2px 2px 6px 2px"></div>
+
+      <div id="stateIdle">
+        <div class="title">Haraya?</div>
+        <div class="card">
+          <div class="row">
+            <input id="dest2" placeholder="Təyinat yeri" autocomplete="off" />
+            <div class="list" id="dest2List"></div>
+            <button id="btnRequest2" type="button">Sifariş et</button>
+            <div class="muted" id="req2Status">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="stateSearching" style="display:none">
+        <div class="title">Sürücü axtarılır</div>
+        <div class="card">
+          <div class="muted" id="searchSub">Yaxın sürücülərə təklif göndərilir…</div>
+          <div class="progress" style="margin:10px 0"><div id="offerBar"></div></div>
+          <div class="two">
+            <button id="btnCancelRide2" class="danger" type="button">Gedişi ləğv et</button>
+            <button id="btnLegacy" class="secondary" type="button">Legacy panel</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="stateAssigned" style="display:none">
+        <div class="title">Sürücü yoldadır</div>
+        <div class="card" id="driverCard2">
+          <b id="drvName2">—</b>
+          <div class="muted" id="drvCar2">—</div>
+          <div class="muted" id="drvEta2">—</div>
+          <div class="two" style="margin-top:10px">
+            <button id="btnCall2" class="secondary" type="button">Zəng</button>
+            <button id="btnCancelRide3" class="danger" type="button">Ləğv et</button>
+          </div>
+          <div class="muted" style="margin-top:8px">Qeyd: Zəng düyməsi demo rejimdədir (telefon nömrəsi DB-də saxlananda aktivləşəcək).</div>
+        </div>
+      </div>
+
+      <div class="card" id="hintCard">
+        <div class="muted">Pick-up: avtomatik olaraq cari yeriniz götürülür (GPS). Əgər GPS icazəsi yoxdursa, telefonun Location icazəsini aktiv edin.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="bottomNav">
+    <button class="navBtn active" id="navHome" type="button"><div class="navIco">🏠</div>Əsas ekran</button>
+    <button class="navBtn" id="navRides" type="button"><div class="navIco">🧾</div>Gediş</button>
+    <button class="navBtn" id="navAccount" type="button"><div class="navIco">👤</div>Hesab</button>
+  </div>
+
+  <div id="legacyWrap">
+    <button class="closeLegacy" id="btnCloseLegacy" type="button">✖</button>
+    <h2>PayTaksi 🚕</h2>
   <div class="muted" id="who"></div>
 
   <div class="card">
@@ -413,5 +806,6 @@ function openCancelModal(ride){
   });
 }
 </script>
+  </div>
 </body>
 </html>
