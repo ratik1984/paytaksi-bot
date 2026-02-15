@@ -11,6 +11,7 @@ import { validateTelegramWebAppData } from './telegramAuth.js';
 import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import http from 'http';
 
 dotenv.config();
 
@@ -71,6 +72,18 @@ const TOKENS = {
   driver: process.env.DRIVER_BOT_TOKEN,
   admin: process.env.ADMIN_BOT_TOKEN
 };
+
+function getInitDataFromReq(req) {
+  // Accept initData from header, query, or body. Header is preferred.
+  let initData = req.headers['x-tg-initdata'] || req.headers['x-telegram-initdata'] || req.query?.initData || req.query?.tgInitData || req.body?.initData;
+  if (!initData || typeof initData !== 'string') return '';
+  initData = initData.trim();
+  // Some clients send URL-encoded initData (e.g., hash%3D...); decode once.
+  if (initData.includes('%3D') || initData.includes('%26')) {
+    try { initData = decodeURIComponent(initData); } catch {}
+  }
+  return initData;
+}
 
 for (const k of Object.keys(TOKENS)) {
   if (!TOKENS[k]) console.warn(`⚠️ Missing ${k} bot token env var`);
@@ -141,6 +154,144 @@ app.get("/app", (req, res) => {
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// Debug helper: inspect what initData the server receives and whether it verifies.
+// Protected by DEBUG_KEY (same pattern used in previous patches).
+app.get('/api/debug/initdata', (req, res) => {
+  const debugKey = process.env.DEBUG_KEY;
+  if (!debugKey) return res.status(404).json({ ok: false, error: 'debug_disabled' });
+  if (String(req.query?.debug_key || '') !== String(debugKey)) {
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  }
+
+  const initData = getInitDataFromReq(req);
+  const hasInitData = !!initData;
+  const results = {};
+  if (hasInitData) {
+    for (const [role, token] of Object.entries(TOKENS)) {
+      if (!token) continue;
+      const check = validateTelegramWebAppData(initData, token);
+      results[role] = { ok: check.ok, reason: check.reason || null };
+    }
+  }
+
+  // Try parse user (best-effort, even if not verified)
+  let user = null;
+  try {
+    user = safeParseTelegramUser(initData);
+  } catch {}
+
+  return res.json({ ok: true, has_initData: hasInitData, initData_len: initData.length, verify: results, user });
+});
+
+// ---- Bolt-like live drivers (SSE)
+// Telegram WebView doesn't reliably allow custom headers on EventSource, so we auth via ?pt=...
+// Events:
+//  - event: snapshot  data: { drivers:[{id,lat,lon,updated_at,online}] }
+//  - event: upsert    data: { id,lat,lon,updated_at,online }
+//  - event: remove    data: { id }
+const sseClients = new Set(); // { res, role, uid }
+
+function sseWrite(res, event, obj) {
+  try {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  } catch (_) {}
+}
+
+async function fetchLiveDrivers({ limit = 200 } = {}) {
+  await ensureDispatchTables();
+  const hasOnline = await driversHaveOnlineCols();
+  const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
+  const q = await pool.query(
+    `SELECT id, last_lat, last_lon, last_loc_at, is_online
+       FROM drivers
+      WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+        AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($1 || ' minutes')::interval)
+        AND (status IS NULL OR status = 'approved')
+        ${hasOnline ? "AND is_online = TRUE" : ""}
+      ORDER BY COALESCE(last_loc_at, NOW()) DESC
+      LIMIT $2`,
+    [String(freshnessMin), Number(limit)]
+  );
+  return (q.rows || []).map((r) => ({
+    id: Number(r.id),
+    lat: Number(r.last_lat),
+    lon: Number(r.last_lon),
+    updated_at: r.last_loc_at ? new Date(r.last_loc_at).toISOString() : null,
+    online: hasOnline ? !!r.is_online : true
+  }));
+}
+
+function broadcastDriverUpsert(payload) {
+  for (const c of sseClients) {
+    sseWrite(c.res, 'upsert', payload);
+  }
+}
+function broadcastDriverRemove(id) {
+  for (const c of sseClients) {
+    sseWrite(c.res, 'remove', { id: Number(id) });
+  }
+}
+
+app.get('/sse/drivers', async (req, res) => {
+  // Auth via pt token only (EventSource can't set headers reliably)
+  const pt = req.query?.pt;
+  const v = verifyPtToken(pt);
+  if (!v.ok || !['passenger', 'admin'].includes(v.payload.role)) {
+    return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  // Initial snapshot
+  try {
+    const drivers = await fetchLiveDrivers({ limit: 250 });
+    sseWrite(res, 'snapshot', { drivers });
+  } catch (_) {
+    sseWrite(res, 'snapshot', { drivers: [] });
+  }
+
+  // Keep-alive ping (some proxies close idle connections)
+  const ping = setInterval(() => {
+    try { res.write(`event: ping\ndata: {}\n\n`); } catch (_) {}
+  }, 25000);
+
+  const client = { res, role: v.payload.role, uid: Number(v.payload.uid) };
+  sseClients.add(client);
+  req.on('close', () => {
+    clearInterval(ping);
+    sseClients.delete(client);
+  });
+});
+
+// Passenger: fetch live drivers (polling fallback)
+app.get('/api/passenger/live_drivers', requireTelegram('passenger'), async (req, res) => {
+  try {
+    const drivers = await fetchLiveDrivers({ limit: 250 });
+    return res.json({ ok: true, drivers });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Passenger: estimate fare (Bolt-like pre-price)
+app.post('/api/passenger/estimate', requireTelegram('passenger'), async (req, res) => {
+  try {
+    const { pickup_lat, pickup_lon, drop_lat, drop_lon } = req.body || {};
+    if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((x) => typeof x !== 'number')) {
+      return res.status(400).json({ ok: false, error: 'bad_coords' });
+    }
+    const distance_km = Math.round(haversineKm(pickup_lat, pickup_lon, drop_lat, drop_lon) * 100) / 100;
+    const fare = calcFare(distance_km);
+    return res.json({ ok: true, distance_km, fare });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
 // ---- Telegram bots (webhook mode)
 const passengerBot = TOKENS.passenger ? new Telegraf(TOKENS.passenger) : null;
 const driverBot = TOKENS.driver ? new Telegraf(TOKENS.driver) : null;
@@ -171,7 +322,20 @@ if (passengerBot) {
   passengerBot.start(async (ctx) => {
     const pt = signPtToken(ctx.from.id, 'passenger');
     const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
-    await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Sifariş et', url));
+    await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Taksi Sifariş Ver', url));
+  });
+
+  // If user deletes keyboard or needs it again
+  passengerBot.command('menu', async (ctx) => {
+    const pt = signPtToken(ctx.from.id, 'passenger');
+    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    await ctx.reply('PayTaksi 🚕\nAşağıdakı düymə ilə paneli açın:', webAppButton('🚕 Taksi Sifariş Ver', url));
+  });
+
+  passengerBot.hears([/taksi/i, /sifari[sş]/i], async (ctx) => {
+    const pt = signPtToken(ctx.from.id, 'passenger');
+    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    await ctx.reply('PayTaksi 🚕\nPanel düyməsi yeniləndi:', webAppButton('🚕 Taksi Sifariş Ver', url));
   });
 }
 
@@ -199,7 +363,7 @@ if (adminBot) app.use(adminBot.webhookCallback(`/webhook/${WEBHOOK_SECRET}/admin
 // ---- Telegram WebApp auth middleware
 function requireTelegram(role) {
   return (req, res, next) => {
-    const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
+    const initData = getInitDataFromReq(req);
 
     // Fallback: signed token from query/header (useful if Telegram initData is empty on some clients)
     if (!initData) {
@@ -219,8 +383,8 @@ function requireTelegram(role) {
       }
     }
 
-    // Fallback: allow "unsafe" mode when initData is not present (no hash verification).
-    if (!initData) {
+    // Optional "unsafe" mode (DISABLED by default). Only enable for local debugging.
+    if (!initData && String(process.env.ALLOW_TG_UNSAFE || '').toLowerCase() === '1') {
       const unsafe = req.headers['x-tg-unsafe'] || req.body?.unsafe;
       if (unsafe) {
         try {
@@ -234,6 +398,9 @@ function requireTelegram(role) {
           }
         } catch (e) {}
       }
+    }
+
+    if (!initData) {
       return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
     }
 
@@ -253,7 +420,7 @@ function requireTelegram(role) {
 // This helper accepts multiple roles and validates initData against the first matching bot token.
 function requireTelegramAny(roles = []) {
   return (req, res, next) => {
-    const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
+    const initData = getInitDataFromReq(req);
 
     // Signed token fallback
     if (!initData) {
@@ -274,8 +441,8 @@ function requireTelegramAny(roles = []) {
       }
     }
 
-    // Unsafe fallback
-    if (!initData) {
+    // Optional "unsafe" mode (DISABLED by default). Only enable for local debugging.
+    if (!initData && String(process.env.ALLOW_TG_UNSAFE || '').toLowerCase() === '1') {
       const unsafe = req.headers['x-tg-unsafe'] || req.body?.unsafe;
       if (unsafe) {
         try {
@@ -291,6 +458,9 @@ function requireTelegramAny(roles = []) {
           }
         } catch (e) {}
       }
+    }
+
+    if (!initData) {
       return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
     }
 
@@ -380,21 +550,11 @@ async function driversHaveLocationCols(){
 }
 
 async function ensureDispatchTables(){
-  // Additive: driver online status columns (some DBs may not have them yet)
-  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;`).catch(()=>{});
-  // Some earlier patches used online_updated_at; keep it additive
-  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS online_updated_at TIMESTAMPTZ;`).catch(()=>{});
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_is_online ON drivers(is_online);`).catch(()=>{});
-
-  // refresh cached capability flags
-  _driversOnlineCols = null;
-
   // Additive: driver last known location (used for nearest dispatch if available)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;`).catch(()=>{});
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lon DOUBLE PRECISION;`).catch(()=>{});
   // Additive: driver location freshness (optional)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_at TIMESTAMPTZ;`).catch(()=>{});
-  _driversLocCols = null;
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_accuracy DOUBLE PRECISION;`).catch(()=>{});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_last_latlon ON drivers(last_lat, last_lon);`).catch(()=>{});
 
@@ -578,9 +738,6 @@ async function expireOffersOnce(limit = 10){
 }
 
 function startOfferExpiryLoop(){
-  // Guard: avoid multiple intervals if ensureDispatchTables() is called often
-  if (global.__PT_OFFER_LOOP_STARTED) return;
-  global.__PT_OFFER_LOOP_STARTED = true;
   setInterval(()=>{ expireOffersOnce(10).catch(()=>{}); }, 5000);
 }
 
@@ -873,21 +1030,28 @@ let fare = calcFare(dist);
 // Promo: first N rides per day are free (counts at creation time)
 let isFreeRide = false;
 if (FREE_RIDES_PER_DAY > 0) {
-  await pool.query(
-    `INSERT INTO promo_free_rides (passenger_user_id, promo_date, used_count)
-     VALUES ($1, (NOW() AT TIME ZONE 'Asia/Baku')::date, 0)
-     ON CONFLICT (passenger_user_id, promo_date) DO NOTHING`,
-    [passenger.id]
-  );
-  const cur = await pool.query(
-    `SELECT used_count FROM promo_free_rides
-       WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
-    [passenger.id]
-  );
-  const used = (cur.rows[0] && cur.rows[0].used_count) ? cur.rows[0].used_count : 0;
-  if (used < FREE_RIDES_PER_DAY) {
-    isFreeRide = true;
-    fare = 0;
+  // NOTE: Some deployments may not have `promo_free_rides` created yet.
+  // If the table is missing, we treat promo as disabled (non-fatal).
+  try {
+    await pool.query(
+      `INSERT INTO promo_free_rides (passenger_user_id, promo_date, used_count)
+       VALUES ($1, (NOW() AT TIME ZONE 'Asia/Baku')::date, 0)
+       ON CONFLICT (passenger_user_id, promo_date) DO NOTHING`,
+      [passenger.id]
+    );
+    const cur = await pool.query(
+      `SELECT used_count FROM promo_free_rides
+         WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+      [passenger.id]
+    );
+    const used = (cur.rows[0] && cur.rows[0].used_count) ? cur.rows[0].used_count : 0;
+    if (used < FREE_RIDES_PER_DAY) {
+      isFreeRide = true;
+      fare = 0;
+    }
+  } catch (e) {
+    // 42P01 = undefined_table (PostgreSQL)
+    if (e && e.code !== '42P01') throw e;
   }
 }
 
@@ -903,12 +1067,16 @@ const commission = money2(fare * COMMISSION_RATE);
   let ride = rideQ.rows[0];
 
 if (isFreeRide) {
-  await pool.query(
-    `UPDATE promo_free_rides
-       SET used_count = used_count + 1
-     WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
-    [passenger.id]
-  );
+  try {
+    await pool.query(
+      `UPDATE promo_free_rides
+         SET used_count = used_count + 1
+       WHERE passenger_user_id=$1 AND promo_date=(NOW() AT TIME ZONE 'Asia/Baku')::date`,
+      [passenger.id]
+    );
+  } catch (e) {
+    if (e && e.code !== '42P01') throw e;
+  }
 }
   // Auto-assign to an eligible online driver (best-effort; keeps "searching" if none)
   try{
@@ -1082,127 +1250,6 @@ app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res
     [passenger.id]
   );
   res.json({ ok: true, rides: q.rows });
-});
-
-// ---- Passenger: nearby drivers for map (Bolt-style live cars)
-// Query params:
-//  - lat, lon: passenger current location
-//  - radius_km: default 3
-// Returns drivers that are (optionally) online, approved, and with fresh last_loc_at.
-app.get('/api/passenger/nearby_drivers', requireTelegram('passenger'), async (req, res) => {
-  try{
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
-    const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
-
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      return res.status(400).json({ ok:false, error:'bad_coords' });
-    }
-
-    await ensureDispatchTables();
-    const hasOnline = await driversHaveOnlineCols();
-
-    // Bounding box pre-filter
-    const dLat = radiusKm / 111.0;
-    const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
-    const dLon = radiusKm / (111.0 * cos);
-
-    const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-
-    const q = await pool.query(
-      `SELECT id, last_lat, last_lon
-         FROM drivers
-        WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-          AND last_lat BETWEEN $1 AND $2
-          AND last_lon BETWEEN $3 AND $4
-          AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
-          AND (status IS NULL OR status = 'approved')
-          ${hasOnline ? "AND is_online = TRUE" : ""}
-        LIMIT 300`,
-      [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
-    );
-
-    const drivers = (q.rows || [])
-      .map(r => {
-        const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
-        return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
-      })
-      .filter(d => d.km <= radiusKm)
-      .sort((a,b) => a.km - b.km)
-      .slice(0, 60);
-
-    return res.json({ ok:true, drivers, radius_km: radiusKm, has_online: hasOnline });
-  }catch(e){
-    console.error('passenger nearby_drivers error:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-// ---- Debug helpers (no Telegram required) - protected by DEBUG_KEY
-// Use: /api/debug/db_migrate?debug_key=12345
-app.get('/api/debug/db_migrate', async (req, res) => {
-  const key = String(req.query.debug_key || '');
-  const expected = String(process.env.DEBUG_KEY || '');
-  if (!expected || key !== expected) return res.status(401).json({ ok:false, error:'forbidden' });
-  try{
-    await ensureDispatchTables();
-    const hasOnline = await driversHaveOnlineCols();
-    const hasLoc = await driversHaveLocationCols();
-    return res.json({ ok:true, has_online: hasOnline, has_location: hasLoc });
-  }catch(e){
-    console.error('db_migrate debug error:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-// Use: /api/debug/nearby_drivers?lat=...&lon=...&radius_km=3&debug_key=12345
-app.get('/api/debug/nearby_drivers', async (req, res) => {
-  const key = String(req.query.debug_key || '');
-  const expected = String(process.env.DEBUG_KEY || '');
-  if (!expected || key !== expected) return res.status(401).json({ ok:false, error:'forbidden' });
-  try{
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
-    const radiusKm = Math.max(0.1, Math.min(50, Number(req.query.radius_km || 3)));
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      return res.status(400).json({ ok:false, error:'bad_coords' });
-    }
-
-    await ensureDispatchTables();
-    const hasOnline = await driversHaveOnlineCols();
-
-    const dLat = radiusKm / 111.0;
-    const cos = Math.cos((lat * Math.PI) / 180) || 0.000001;
-    const dLon = radiusKm / (111.0 * cos);
-
-    const freshnessMin = Number(process.env.DRIVER_LOC_FRESH_MIN || 3);
-    const q = await pool.query(
-      `SELECT id, last_lat, last_lon
-         FROM drivers
-        WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
-          AND last_lat BETWEEN $1 AND $2
-          AND last_lon BETWEEN $3 AND $4
-          AND (last_loc_at IS NULL OR last_loc_at > NOW() - ($5 || ' minutes')::interval)
-          AND (status IS NULL OR status = 'approved')
-          ${hasOnline ? "AND is_online = TRUE" : ""}
-        LIMIT 300`,
-      [lat - dLat, lat + dLat, lon - dLon, lon + dLon, String(freshnessMin)]
-    );
-
-    const drivers = (q.rows || [])
-      .map(r => {
-        const km = haversineKm(lat, lon, Number(r.last_lat), Number(r.last_lon));
-        return { id: Number(r.id), lat: Number(r.last_lat), lon: Number(r.last_lon), km: Math.round(km*100)/100 };
-      })
-      .filter(d => d.km <= radiusKm)
-      .sort((a,b) => a.km - b.km)
-      .slice(0, 100);
-
-    return res.json({ ok:true, drivers, radius_km: radiusKm, has_online: hasOnline });
-  }catch(e){
-    console.error('debug nearby_drivers error:', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }
 });
 
 // ---- Driver: register + upload docs
@@ -1402,6 +1449,21 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
       }catch(_){ }
     }
 
+    // Broadcast online/offline (best-effort)
+    if (!want) {
+      broadcastDriverRemove(req.driver.id);
+    } else {
+      if (typeof lat === 'number' && typeof lon === 'number') {
+        broadcastDriverUpsert({
+          id: Number(req.driver.id),
+          lat: Number(lat),
+          lon: Number(lon),
+          updated_at: new Date().toISOString(),
+          online: true
+        });
+      }
+    }
+
     return res.json({ ok:true, applied:true, online: want });
   }catch(e){
     // If columns are missing in this DB, avoid aborting the transaction.
@@ -1443,6 +1505,16 @@ app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession
       );
     }
     await pool.query('COMMIT');
+
+    // Broadcast to passengers/admins (Bolt-like live cars)
+    broadcastDriverUpsert({
+      id: Number(req.driver.id),
+      lat: Number(lat),
+      lon: Number(lon),
+      updated_at: new Date().toISOString(),
+      online: true
+    });
+
     return res.json({ ok:true, applied:true });
   }catch(e){
     try{ await pool.query('ROLLBACK TO SAVEPOINT sp_loc'); }catch{}
