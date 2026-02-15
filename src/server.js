@@ -380,11 +380,21 @@ async function driversHaveLocationCols(){
 }
 
 async function ensureDispatchTables(){
+  // Additive: driver online status columns (some DBs may not have them yet)
+  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;`).catch(()=>{});
+  // Some earlier patches used online_updated_at; keep it additive
+  await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS online_updated_at TIMESTAMPTZ;`).catch(()=>{});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_is_online ON drivers(is_online);`).catch(()=>{});
+
+  // refresh cached capability flags
+  _driversOnlineCols = null;
+
   // Additive: driver last known location (used for nearest dispatch if available)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;`).catch(()=>{});
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lon DOUBLE PRECISION;`).catch(()=>{});
   // Additive: driver location freshness (optional)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_at TIMESTAMPTZ;`).catch(()=>{});
+  _driversLocCols = null;
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_loc_accuracy DOUBLE PRECISION;`).catch(()=>{});
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_drivers_last_latlon ON drivers(last_lat, last_lon);`).catch(()=>{});
 
@@ -568,6 +578,9 @@ async function expireOffersOnce(limit = 10){
 }
 
 function startOfferExpiryLoop(){
+  // Guard: avoid multiple intervals if ensureDispatchTables() is called often
+  if (global.__PT_OFFER_LOOP_STARTED) return;
+  global.__PT_OFFER_LOOP_STARTED = true;
   setInterval(()=>{ expireOffersOnce(10).catch(()=>{}); }, 5000);
 }
 
