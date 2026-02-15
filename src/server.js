@@ -12,6 +12,7 @@ import { Telegraf, Markup } from 'telegraf';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 
 dotenv.config();
 
@@ -23,6 +24,35 @@ app.use(helmet({ contentSecurityPolicy: false })); // Telegram WebApp needs rela
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// --- Realtime socket layer (Passenger live drivers + ride status) ---
+const httpServer = http.createServer(app);
+const io = new SocketIOServer(httpServer, {
+  cors: { origin: true, methods: ['GET','POST'] },
+});
+
+function ioEmit(event, payload){
+  try { io.emit(event, payload); } catch(_) {}
+}
+
+async function emitRideUpdateById(rideId){
+  try {
+    const { rows } = await pool.query(
+      `SELECT r.*,
+              d.full_name AS driver_name, d.car_model AS driver_car_model, d.car_plate AS driver_car_plate,
+              d.last_lat AS driver_lat, d.last_lon AS driver_lon
+       FROM rides r
+       LEFT JOIN drivers d ON d.id = r.driver_id
+       WHERE r.id = $1`,
+      [rideId]
+    );
+    if (!rows[0]) return;
+    ioEmit('ride:update', rows[0]);
+  } catch(e) {
+    // ignore
+  }
+}
+
 
 // ---- Config
 const APP_BASE_URL = process.env.APP_BASE_URL; // e.g. https://paytaksi-telegram.onrender.com
@@ -2089,6 +2119,30 @@ app.post('/api/admin/topup_review', adminAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+
+
+// Admin live snapshot (drivers + active rides) for realtime map
+app.get('/api/admin/live_snapshot', adminAuth, async (req, res) => {
+  try {
+    const driversQ = await pool.query(
+      `SELECT id, full_name, car_model, car_plate, status, last_lat, last_lon, updated_at
+       FROM drivers
+       WHERE last_lat IS NOT NULL AND last_lon IS NOT NULL
+       ORDER BY updated_at DESC
+       LIMIT 300`
+    );
+    const ridesQ = await pool.query(
+      `SELECT r.*
+       FROM rides r
+       WHERE UPPER(r.status) IN ('SEARCHING','ASSIGNED','ARRIVING','STARTED')
+       ORDER BY r.created_at DESC
+       LIMIT 300`
+    );
+    return res.json({ ok:true, drivers: driversQ.rows, rides: ridesQ.rows });
+  } catch(e){
+    return res.status(500).json({ ok:false, error:'snapshot_failed' });
+  }
+});
 app.get('/api/admin/rides', adminAuth, async (req, res) => {
   const q = await pool.query(
     `SELECT r.*, pu.tg_id as passenger_tg_id, pu.first_name as passenger_name,

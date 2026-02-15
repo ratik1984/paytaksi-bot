@@ -29,11 +29,8 @@
     }
     *{ box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
     html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
-    #wrap{position:fixed; inset:0; overflow:hidden; background:#000; z-index:0;}
-    #map{
-      position:fixed; inset:0;
-      z-index:0;
-    }
+    #wrap{ position:fixed; inset:0; display:flex; flex-direction:column; }
+    #map{ position:absolute; inset:0; }
     .topBtns{
       position:absolute; top:14px; left:14px; right:14px;
       display:flex; justify-content:space-between; pointer-events:none;
@@ -42,16 +39,13 @@
     .fab svg{ width:22px; height:22px; }
 
     .sheet{
-      position:fixed; left:0; right:0; bottom:0;
+      position:absolute; left:0; right:0; bottom:0;
       background:var(--card);
       border-top-left-radius:24px;
       border-top-right-radius:24px;
       box-shadow:0 -14px 40px rgba(0,0,0,.18);
-      padding:10px 14px calc(18px + env(safe-area-inset-bottom));
+      padding:10px 14px 18px;
       touch-action: manipulation;
-      z-index:5000;
-      max-height:62vh;
-      overflow:auto;
     }
     .grab{ width:46px; height:5px; border-radius:999px; background:#d1d5db; margin:6px auto 10px; }
     h1{ font-size:34px; margin:6px 4px 10px; letter-spacing:-0.6px; }
@@ -133,7 +127,10 @@
     .sug{padding:10px 12px;border:1px solid var(--line);border-radius:14px;margin:8px 0;background:#fafafa;cursor:pointer}
     .sug strong{display:block}
     .sug span{display:block;font-size:12px;color:var(--muted);margin-top:2px}
-  </style>
+  #wrap{position:relative; z-index:1;}
+#map{position:relative; z-index:0;}
+.bottom-sheet{position:relative; z-index:9999;}
+</style>
 </head>
 
 <body>
@@ -822,5 +819,57 @@
     }
     setInterval(updateEstimate, 900);
   </script>
+
+<!-- Socket.IO (Realtime) -->
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function(){
+  try {
+    const socket = io();
+    window.__pt_socket = socket;
+
+    function getPassengerId(){
+      return (window.__passenger_id || (window.__TG_USER__ && window.__TG_USER__.id) || (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user && Telegram.WebApp.initDataUnsafe.user.id) || null);
+    }
+
+    // Wrap createRide to also notify realtime dispatch
+    const _createRide = window.createRide;
+    if (typeof _createRide === "function") {
+      window.createRide = async function(...args){
+        const res = await _createRide.apply(this, args);
+        try {
+          // Best-effort extract current pickup/dropoff from globals used by the page
+          const payload = {
+            passengerId: getPassengerId(),
+            rideId: (res && res.ride_id) || (res && res.id) || null,
+            pickup: (window.__pickup_text || window.pickupText || null),
+            dropoff: (window.__dropoff_text || window.dropoffText || null),
+            price: (window.__price_value || window.priceValue || null)
+          };
+          socket.emit("create-order", payload);
+        } catch(e){}
+        return res;
+      }
+    }
+
+    // Live driver movement: update marker if helper exists
+    socket.on("driver-update", (d) => {
+      try {
+        if (typeof window.setMarker === "function" && d && d.lat != null && d.lng != null) {
+          window.setMarker("drv", Number(d.lat), Number(d.lng));
+        }
+      } catch(e){}
+    });
+
+    // Ride accepted update for passenger UI (if you already have renderRide/poll)
+    socket.on("ride:update", (data) => {
+      console.log("ride:update", data);
+    });
+  } catch(e) {
+    console.warn("socket init failed", e);
+  }
+})();
+</script>
+
 </body>
 </html>
