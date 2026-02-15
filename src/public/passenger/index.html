@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PayTaksi - Sərnişin</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="../assets/common.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 
     :root{
@@ -815,7 +818,197 @@ function openCancelModal(ride){
     };
   });
 }
+
 </script>
+
+<script>
+// --- Premium passenger UI wiring (Stage1 Hotfix2)
+(function(){
+  const who2 = document.getElementById('who2');
+  const req2Status = document.getElementById('req2Status');
+  const dest2 = document.getElementById('dest2');
+  const dest2List = document.getElementById('dest2List');
+  const btnRequest2 = document.getElementById('btnRequest2');
+  const btnCenter = document.getElementById('btnCenter');
+  const btnLegacy = document.getElementById('btnLegacy');
+  const legacyWrap = document.getElementById('legacyWrap');
+  const btnCloseLegacy = document.getElementById('btnCloseLegacy');
+
+  const stateIdle = document.getElementById('stateIdle');
+  const stateSearching = document.getElementById('stateSearching');
+  const offerBar = document.getElementById('offerBar');
+
+  const u = (typeof tgUser === 'function') ? tgUser() : null;
+  if (who2) who2.textContent = u ? `İstifadəçi: ${u.first_name||''} (@${u.username||'-'})` : 'Local dev mode';
+
+  function setReq(msg, ok=true){
+    if (!req2Status) return;
+    req2Status.textContent = msg;
+    req2Status.style.color = ok ? '' : 'crimson';
+  }
+
+  // Leaflet map
+  let map = null;
+  let pickupMarker = null;
+  let pickupCircle = null;
+  let pickup = null;
+  let drop = null;
+  let dropMarker = null;
+
+  function ensureMap(){
+    if (map) return map;
+    try{
+      map = L.map('map', { zoomControl:false, attributionControl:false });
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
+      map.setView([40.4093, 49.8671], 13);
+    }catch(e){
+      setReq('Xəritə açıla bilmədi (Leaflet).', false);
+    }
+    return map;
+  }
+
+  function setPickup(lat, lon, text){
+    pickup = { lat, lon, text: text||'Mənim yerim' };
+    const m = ensureMap();
+    if (!m) return;
+    const ll = [lat, lon];
+    if (!pickupMarker){
+      pickupMarker = L.circleMarker(ll, { radius:8, weight:2, fillOpacity:1 }).addTo(m);
+    } else pickupMarker.setLatLng(ll);
+
+    if (!pickupCircle){
+      pickupCircle = L.circle(ll, { radius: 60, weight:1, fillOpacity:0.12 }).addTo(m);
+    } else pickupCircle.setLatLng(ll);
+
+    m.setView(ll, Math.max(m.getZoom(), 15));
+  }
+
+  function setDrop(lat, lon, text){
+    drop = { lat, lon, text: text||'Təyinat' };
+    const m = ensureMap();
+    if (!m) return;
+    const ll = [lat, lon];
+    if (!dropMarker){
+      dropMarker = L.marker(ll).addTo(m);
+    } else dropMarker.setLatLng(ll);
+  }
+
+  async function reverseName(lat, lon){
+    try{
+      const url = new URL('/api/reverse', location.origin);
+      url.searchParams.set('lat', lat);
+      url.searchParams.set('lon', lon);
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.ok && (j.name || j.display_name)) return (j.name || j.display_name);
+    }catch(e){}
+    return null;
+  }
+
+  async function ensurePickup(){
+    if (pickup) return pickup;
+    setReq('GPS oxunur…');
+    return new Promise((resolve)=>{
+      if (!navigator.geolocation) { setReq('GPS dəstəklənmir.', false); return resolve(null); }
+      navigator.geolocation.getCurrentPosition(async (pos)=>{
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        let name = await reverseName(lat, lon);
+        setPickup(lat, lon, name||'Mənim yerim');
+        setReq(name ? `Pick-up: ${name}` : 'Yer tapıldı ✅');
+        resolve(pickup);
+      }, (err)=>{
+        setReq('GPS icazəsi verilmədi. Telefon Location icazəsini aktiv edin.', false);
+        resolve(null);
+      }, { enableHighAccuracy:true, timeout:12000 });
+    });
+  }
+
+  // Autocomplete via backend /api/places
+  let tmr2 = null;
+  async function loadSuggestions2(q){
+    if (!q || q.length < 3){ dest2List.innerHTML = ''; return; }
+    try{
+      const url = new URL('/api/places', location.origin);
+      url.searchParams.set('q', q);
+      if (pickup){ url.searchParams.set('lat', pickup.lat); url.searchParams.set('lon', pickup.lon); }
+      const r = await fetch(url);
+      const data = await r.json();
+      dest2List.innerHTML = '';
+      (data.items||[]).forEach((it)=>{
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.textContent = it.title;
+        div.onclick = ()=>{
+          dest2.value = it.title;
+          dest2List.innerHTML = '';
+          setDrop(it.lat, it.lon, it.title);
+          setReq('Təyinat seçildi ✅');
+        };
+        dest2List.appendChild(div);
+      });
+      if (!(data.items||[]).length) setReq('Alternativ tapılmadı (3+ hərf yazın).', true);
+    }catch(e){
+      dest2List.innerHTML = '';
+      setReq('Axtarış xidməti işləmir (/api/places).', false);
+    }
+  }
+
+  if (dest2){
+    dest2.addEventListener('input', (e)=>{
+      drop = null;
+      clearTimeout(tmr2);
+      const q = String(e.target.value||'').trim();
+      tmr2 = setTimeout(()=> loadSuggestions2(q), 250);
+    });
+  }
+
+  if (btnCenter){
+    btnCenter.onclick = async ()=>{
+      const p = await ensurePickup();
+      if (p && map) map.setView([p.lat,p.lon], 16);
+    };
+  }
+
+  // Legacy panel open
+  if (btnLegacy && legacyWrap && btnCloseLegacy){
+    btnLegacy.onclick = ()=>{ legacyWrap.style.display = 'block'; };
+    btnCloseLegacy.onclick = ()=>{ legacyWrap.style.display = 'none'; };
+  }
+
+  async function createRide(){
+    const p = await ensurePickup();
+    if (!p) return;
+    if (!drop){ setReq('Gedəcəyiniz yeri siyahıdan seçin.', false); return; }
+    try{
+      setReq('Sifariş yaradılır…');
+      const data = await api('/api/passenger/create_ride', { method:'POST', body:{
+        pickup_lat:p.lat, pickup_lon:p.lon, pickup_text:p.text,
+        drop_lat:drop.lat, drop_lon:drop.lon, drop_text:drop.text
+      }});
+      const ride = data.ride || data;
+      setReq(`Sifariş #${ride.id} yaradıldı. Sürücü axtarılır…`);
+      if (stateIdle) stateIdle.style.display = 'none';
+      if (stateSearching) stateSearching.style.display = '';
+      let pct = 0;
+      const tick = setInterval(()=>{
+        pct = Math.min(100, pct + 4);
+        if (offerBar) offerBar.style.width = pct + '%';
+        if (pct >= 100) clearInterval(tick);
+      }, 500);
+    }catch(e){
+      setReq('Xəta: ' + (e?.data?.reason || e?.data?.error || e.message), false);
+    }
+  }
+
+  if (btnRequest2) btnRequest2.onclick = createRide;
+
+  // Auto init
+  setTimeout(()=>{ ensureMap(); ensurePickup(); }, 50);
+})();
+</script>
+
   </div>
 </body>
+
 </html>
