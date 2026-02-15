@@ -535,12 +535,13 @@
     if (String(r.status) === 'assigned' || String(r.status) === 'started'){
       uiShowState('assigned');
       __lastAssignedRide = r;
-      const name = (r.driver_first_name || '').trim() || 'Sürücü';
+      const name = (String(r.driver_first_name||'' ).trim() || (r.driver_username ? ' + r.driver_username : (r.driver_tg_id ? 'tg:' + r.driver_tg_id : 'Sürücü')));
       const plate = (r.driver_plate || '').trim();
       const car = [r.driver_car_make, r.driver_car_model].filter(Boolean).join(' ');
       const color = (r.driver_car_color || '').trim();
       drvName2 && (drvName2.textContent = name + (plate ? ` • ${plate}` : ''));
-      drvCar2 && (drvCar2.textContent = [car, color, r.driver_car_year].filter(Boolean).join(' • ') || '—');
+      const carLine = [car, color, r.driver_car_year].filter(Boolean).join(' • ');
+      drvCar2 && (drvCar2.textContent = carLine || 'Profil tamamlanmayıb');
 
       // Contact hint
       const phone = String(r.driver_phone||'').trim();
