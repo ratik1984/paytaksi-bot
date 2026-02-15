@@ -126,6 +126,17 @@ const upload = multer({ storage });
 app.use('/uploads', express.static(uploadDir));
 app.use('/app', express.static(path.join(__dirname, 'public')));
 
+// Root: open Passenger WebApp by default (BotFather menu button points to base URL)
+app.get("/", (req, res) => {
+  return res.redirect(302, "/app/passenger/");
+});
+
+// Convenience: /app -> passenger
+app.get("/app", (req, res) => {
+  return res.redirect(302, "/app/passenger/");
+});
+
+
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -234,6 +245,73 @@ function requireTelegram(role) {
     req.tgUser = userJson ? JSON.parse(userJson) : null;
     if (!req.tgUser?.id) return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_user' });
     next();
+  };
+}
+
+// Some endpoints are shared between passenger/driver WebApps.
+// This helper accepts multiple roles and validates initData against the first matching bot token.
+function requireTelegramAny(roles = []) {
+  return (req, res, next) => {
+    const initData = req.headers['x-tg-initdata'] || req.body?.initData || req.query?.initData;
+
+    // Signed token fallback
+    if (!initData) {
+      const pt = req.headers['x-pt-token'] || req.body?.pt || req.query?.pt;
+      if (pt) {
+        const v = verifyPtToken(pt);
+        if (v.ok) {
+          if (!roles.includes(v.payload.role)) {
+            return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'role_mismatch' });
+          }
+          req.tgInitData = '';
+          req.tgUser = { id: Number(v.payload.uid) };
+          req.tgUnsafe = true;
+          req.ptToken = pt;
+          req.tgRole = v.payload.role;
+          return next();
+        }
+      }
+    }
+
+    // Unsafe fallback
+    if (!initData) {
+      const unsafe = req.headers['x-tg-unsafe'] || req.body?.unsafe;
+      if (unsafe) {
+        try {
+          const parsed = typeof unsafe === 'string' ? JSON.parse(unsafe) : unsafe;
+          const user = parsed?.user;
+          const role = parsed?.role;
+          if (user?.id && roles.includes(role)) {
+            req.tgInitData = '';
+            req.tgUser = user;
+            req.tgUnsafe = true;
+            req.tgRole = role;
+            return next();
+          }
+        } catch (e) {}
+      }
+      return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_initData_or_token' });
+    }
+
+    // Try each role token
+    for (const role of roles) {
+      const botToken = TOKENS[role];
+      if (!botToken) continue;
+      const check = validateTelegramWebAppData(initData, botToken);
+      if (check.ok) {
+        req.tgInitData = initData;
+        const params = new URLSearchParams(initData);
+        const userJson = params.get('user');
+        req.tgUser = userJson ? JSON.parse(userJson) : null;
+        if (!req.tgUser?.id) {
+          return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'missing_user' });
+        }
+        req.tgRole = role;
+        return next();
+      }
+    }
+
+    return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'invalid_hash' });
   };
 }
 
@@ -801,30 +879,151 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
+  // Uses PostgreSQL pool + real schema columns.
+  // Previous implementation referenced `db.*` and non-existent columns, causing 500 server_error.
   try {
-    const passenger_tg_id = String(req.tgUser.id);
-    const ride_id = Number(req.body.ride_id);
+    const ride_id = Number(req.body?.ride_id);
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
-    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    const passenger = await upsertUser(req.tgUser, 'passenger');
 
-    if (!['searching','assigned'].includes(ride.status)) {
+    await pool.query('BEGIN');
+    const rideQ = await pool.query(
+      `SELECT * FROM rides WHERE id=$1 AND passenger_user_id=$2 FOR UPDATE`,
+      [ride_id, passenger.id]
+    );
+    const ride = rideQ.rows[0];
+    if (!ride) {
+      await pool.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    }
+
+    if (!['searching', 'assigned'].includes(ride.status)) {
+      await pool.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
     }
 
-    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+    const upd = await pool.query(
+      `UPDATE rides
+         SET status='cancelled', updated_at=NOW(), offered_driver_id=NULL, offer_expires_at=NULL
+       WHERE id=$1
+       RETURNING *`,
+      [ride_id]
+    );
 
-    if (ride.driver_tg_id) {
-      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
-    }
+    // Audit (best-effort)
+    await pool.query(
+      `INSERT INTO ride_cancellations(ride_id, actor_role, actor_tg_id, reason)
+       VALUES ($1,'passenger',$2,$3)`,
+      [ride_id, Number(req.tgUser.id), 'passenger_cancel']
+    ).catch(() => {});
 
-    return res.json({ ok: true });
+    await pool.query('COMMIT');
+
+    // Notify driver (best-effort)
+    try {
+      if (upd.rows[0]?.driver_id) {
+        const dq = await pool.query(
+          `SELECT u.tg_id
+             FROM drivers d
+             JOIN users u ON u.id=d.user_id
+            WHERE d.id=$1`,
+          [upd.rows[0].driver_id]
+        );
+        const driverTg = dq.rows[0]?.tg_id;
+        if (driverTg) {
+          await sendTelegramToRole('driver', driverTg, `❌ Sifariş ləğv edildi (#${ride_id}).`);
+        }
+      }
+    } catch (_) {}
+
+    return res.json({ ok: true, ride: upd.rows[0] });
   } catch (e) {
-    console.error(e);
+    try { await pool.query('ROLLBACK'); } catch (_) {}
+    console.error('cancel_ride failed:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
+// Unified "active ride" endpoint used by newer passenger/driver UIs.
+// Frontend may call /api/active-ride or /active-ride. Keep both for compatibility.
+async function handleActiveRide(req, res) {
+  try {
+    if (req.tgRole === 'passenger') {
+      const passenger = await upsertUser(req.tgUser);
+      const rideR = await db.query(
+        `SELECT *
+           FROM rides
+          WHERE passenger_user_id=$1
+            AND status IN ('searching','assigned','started')
+          ORDER BY id DESC
+          LIMIT 1`,
+        [passenger.id]
+      );
+
+      if (rideR.rowCount === 0) {
+        return res.json({ ok: true, role: 'passenger', ride: null });
+      }
+
+      const ride = rideR.rows[0];
+      let driver = null;
+      if (ride.driver_id) {
+        const dR = await db.query(
+          `SELECT id, tg_id, name, phone, car_plate, car_model, last_lat, last_lon
+             FROM drivers
+            WHERE id=$1`,
+          [ride.driver_id]
+        );
+        driver = dR.rowCount ? dR.rows[0] : null;
+      }
+      return res.json({ ok: true, role: 'passenger', ride, driver });
+    }
+
+    if (req.tgRole === 'driver') {
+      const dR = await db.query('SELECT * FROM drivers WHERE tg_id=$1', [Number(req.tgUser.id)]);
+      if (dR.rowCount === 0) {
+        return res.json({ ok: true, role: 'driver', ride: null });
+      }
+      const driver = dR.rows[0];
+      const rideR = await db.query(
+        `SELECT *
+           FROM rides
+          WHERE driver_id=$1
+            AND status IN ('assigned','started')
+          ORDER BY id DESC
+          LIMIT 1`,
+        [driver.id]
+      );
+      if (rideR.rowCount === 0) {
+        return res.json({ ok: true, role: 'driver', ride: null });
+      }
+      const ride = rideR.rows[0];
+      const pR = await db.query('SELECT id, tg_id, first_name, username, phone FROM users WHERE id=$1', [ride.passenger_user_id]);
+      const passenger = pR.rowCount ? pR.rows[0] : null;
+      return res.json({ ok: true, role: 'driver', ride, passenger, driver: {
+        id: driver.id,
+        tg_id: driver.tg_id,
+        name: driver.name,
+        phone: driver.phone,
+        car_plate: driver.car_plate,
+        car_model: driver.car_model,
+        last_lat: driver.last_lat,
+        last_lon: driver.last_lon,
+      }});
+    }
+
+    return res.status(401).json({ ok: false, error: 'telegram_auth_failed', reason: 'role_unknown' });
+  } catch (e) {
+    console.error('active-ride error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+}
+
+app.get('/api/active-ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
+app.get('/api/active_ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
+app.get('/active-ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
+app.get('/active-ride/', requireTelegramAny(['passenger','driver']), handleActiveRide);
+app.get('/active_ride', requireTelegramAny(['passenger','driver']), handleActiveRide);
 
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
@@ -1335,15 +1534,65 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  const rideQ = await pool.query(
-    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
-     WHERE id=$2 AND status='searching'
-     RETURNING *`,
-    [driver.id, ride_id]
+  // Prevent accepting multiple rides.
+  const busyQ = await pool.query(
+    `SELECT id FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
+    [driver.id]
   );
-  if (!rideQ.rows[0]) return res.status(409).json({ ok: false, error: 'ride_not_available' });
-  await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
-  res.json({ ok: true, ride: rideQ.rows[0] });
+  if (busyQ.rows[0]) return res.status(409).json({ ok: false, error: 'driver_busy' });
+
+  // Accept means: claim the ride (assigned + driver_id) if it's available.
+  // We allow accepting either:
+  // 1) an active offer to this driver (not expired)
+  // 2) an unoffered searching ride (fallback)
+  try {
+    await pool.query('BEGIN');
+    const r0 = await pool.query(`SELECT * FROM rides WHERE id=$1 FOR UPDATE`, [ride_id]);
+    const ride0 = r0.rows[0];
+    if (!ride0 || ride0.status !== 'searching') {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
+    }
+
+    const offeredOk =
+      (ride0.offered_driver_id === null || ride0.offered_driver_id === undefined) ? true :
+      (Number(ride0.offered_driver_id) === Number(driver.id) && (!ride0.offer_expires_at || new Date(ride0.offer_expires_at).getTime() > Date.now()));
+
+    if (!offeredOk) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'not_offered_to_you' });
+    }
+
+    const rideQ = await pool.query(
+      `UPDATE rides
+          SET driver_id=$1, status='assigned', offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW()
+        WHERE id=$2 AND status='searching'
+        RETURNING *`,
+      [driver.id, ride_id]
+    );
+    if (!rideQ.rows[0]) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
+    }
+
+    await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+    await pool.query('COMMIT');
+
+    // Notify passenger (best-effort)
+    try {
+      const pq = await pool.query(`SELECT u.tg_id FROM rides r JOIN users u ON u.id=r.passenger_user_id WHERE r.id=$1`, [ride_id]);
+      const passengerTg = pq.rows[0]?.tg_id;
+      if (passengerTg) {
+        await sendTelegramToRole('passenger', passengerTg, `✅ Sifarişiniz qəbul edildi (#${ride_id}).`);
+      }
+    } catch (_) {}
+
+    return res.json({ ok: true, ride: rideQ.rows[0] });
+  } catch (e) {
+    try { await pool.query('ROLLBACK'); } catch (_) {}
+    console.error('driver accept failed:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
 });
 
 
@@ -1405,7 +1654,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
   await pool.query('BEGIN');
   try {
     await pool.query(`UPDATE rides SET status='completed', updated_at=NOW() WHERE id=$1`, [ride_id]);
-    await pool.query(`UPDATE drivers SET balance=$1, status=CASE WHEN status='approved' AND $1 <= ${DRIVER_BLOCK_AT} THEN 'blocked' ELSE status END WHERE id=$2`, [newBal, driver.id]);
+    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, driver.id]);
     await pool.query('COMMIT');
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -1529,20 +1778,8 @@ app.post('/api/admin/driver_balance', adminAuth, async (req, res) => {
 
     const newBal = money2(Number(d.balance) + a);
     await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, d.id]);
-
-    // Auto-toggle driver status based on balance threshold (keeps UX consistent)
-    // If balance <= block limit and driver was approved -> blocked
-    // If driver was blocked due to balance and balance is now above limit -> approved
-    let newStatus = d.status;
-    const nb = Number(newBal);
-    if (d.status === 'approved' && nb <= DRIVER_BLOCK_AT) newStatus = 'blocked';
-    if (d.status === 'blocked' && nb > DRIVER_BLOCK_AT) newStatus = 'approved';
-    if (newStatus !== d.status) {
-      await pool.query(`UPDATE drivers SET status=$1 WHERE id=$2`, [newStatus, d.id]);
-    }
-
     await pool.query('COMMIT');
-    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, status: newStatus, note: note || null });
+    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, note: note || null });
   } catch (e) {
     await pool.query('ROLLBACK');
     return res.status(400).json({ ok: false, error: String(e.message || e) });
