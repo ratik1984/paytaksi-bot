@@ -40,7 +40,14 @@
     #onlinePill.offline{background:#1a2536;color:var(--text);border:1px solid rgba(255,255,255,.08)}
 
     /* Bottom sheet */
-    #sheet{position:absolute;left:0;right:0;bottom:0;height:54vh;background:linear-gradient(180deg, rgba(15,23,34,.94), rgba(15,23,34,.98));border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid rgba(255,255,255,.08);overflow:hidden}
+    #sheet{position:absolute;left:0;right:0;bottom:0;height:54vh;
+      background:linear-gradient(180deg, rgba(15,23,34,.84), rgba(15,23,34,.96));
+      border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid rgba(255,255,255,.08);
+      overflow:hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 -18px 60px rgba(0,0,0,.55);
+    }
     #sheetHandle{width:44px;height:5px;border-radius:999px;background:rgba(255,255,255,.22);margin:10px auto 8px auto}
     #sheetInner{height:100%;overflow:auto;padding:0 14px 80px 14px}
 
@@ -81,6 +88,13 @@
     .pin{display:flex;align-items:center;justify-content:center;border-radius:999px;border:2px solid rgba(255,255,255,.9);box-shadow:0 8px 22px rgba(0,0,0,.35)}
     .pin.me{background:#1bb66a;width:28px;height:28px}
     .pin.peer{background:#ef4444;width:18px;height:18px;border-color:rgba(255,255,255,.85)}
+
+    /* Car marker (Bolt-like) */
+    .carPin{width:46px;height:46px;position:relative;filter: drop-shadow(0 10px 22px rgba(0,0,0,.45));}
+    .carShadow{position:absolute;left:50%;top:50%;transform:translate(-50%,-10%);width:30px;height:18px;border-radius:999px;background:rgba(0,0,0,.35);filter:blur(6px);}
+    .carBody{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) rotate(0deg);transform-origin:50% 50%;transition:transform .28s ease;}
+    .carSvg{width:42px;height:42px;display:block}
+    .carRing{filter: drop-shadow(0 6px 16px rgba(0,0,0,.35));}
 
   </style>
 </head>
@@ -317,7 +331,9 @@ const btnNearbyManual = document.getElementById('btnNearbyManual');
 restoreFilters();
 
 const u = tgUser();
-who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
+const __isLocalDev = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : (__isLocalDev ? 'Local dev mode' : '');
+if (!who.textContent) who.style.display = 'none';
 
 // ---------------- UI: map + tabs ----------------
 let __map = null;
@@ -326,12 +342,66 @@ let __peerLayer = null;
 let __lastGeo = null;
 let __myIcon = null;
 let __peerIcon = null;
+let __prevLL = null;
+let __lastBearing = 0;
+
+function bearingDeg(a, b){
+  const toRad = (x)=>x*Math.PI/180;
+  const toDeg = (x)=>x*180/Math.PI;
+  const lat1 = toRad(a[0]);
+  const lat2 = toRad(b[0]);
+  const dLon = toRad(b[1]-a[1]);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  const brng = (toDeg(Math.atan2(y, x)) + 360) % 360;
+  return brng;
+}
+
+function setCarRotation(deg){
+  if (!__myMarker) return;
+  const el = __myMarker.getElement?.();
+  const body = el?.querySelector?.('.carBody');
+  if (!body) return;
+  body.style.transform = `translate(-50%,-50%) rotate(${deg}deg)`;
+}
 
 function initMap(){
   try{
     if (!window.L || __map) return;
     __map = L.map('map', { zoomControl:false, attributionControl:false });
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(__map);
+
+    // Dark tiles for a more "Bolt-like" look
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(__map);
+
+    // Car icon (rotates based on movement direction)
+    __myIcon = L.divIcon({
+      className: '',
+      iconSize: [46,46],
+      iconAnchor: [23,23],
+      html: `
+        <div class="carPin">
+          <div class="carShadow"></div>
+          <div class="carBody">
+            <svg class="carSvg" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <defs>
+                <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+                  <stop offset="0" stop-color="#FFFFFF" stop-opacity=".92"/>
+                  <stop offset="1" stop-color="#DDE7F3" stop-opacity=".92"/>
+                </linearGradient>
+              </defs>
+              <circle class="carRing" cx="32" cy="32" r="22" fill="rgba(27,182,106,.14)" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
+              <path d="M22 36c0-2 1-4 3-5l4-7c1-2 3-3 5-3h6c2 0 4 1 5 3l4 7c2 1 3 3 3 5v6c0 1-1 2-2 2h-1c-1 0-2-1-2-2v-1H25v1c0 1-1 2-2 2h-1c-1 0-2-1-2-2v-6z" fill="url(#g)"/>
+              <path d="M27 26h10l3 6H24l3-6z" fill="rgba(12,18,28,.85)"/>
+              <circle cx="26" cy="41" r="3" fill="rgba(12,18,28,.9)"/>
+              <circle cx="38" cy="41" r="3" fill="rgba(12,18,28,.9)"/>
+              <path d="M32 18l0 6" stroke="#1bb66a" stroke-width="3" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>`
+    });
+
+    __peerIcon = L.divIcon({ className:'', iconSize:[18,18], iconAnchor:[9,9], html:'<div class="pin peer"></div>' });
+
     __map.setView([40.4093, 49.8671], 12); // Baku default
   }catch(_){ /* ignore */ }
 }
@@ -342,8 +412,20 @@ function updateMyMarker(geo){
   const lat = Number(__lastGeo.lat), lon = Number(__lastGeo.lon);
   if (!isFinite(lat) || !isFinite(lon)) return;
   const ll = [lat, lon];
-  if (!__myMarker) __myMarker = L.marker(ll, { icon: __myIcon || undefined }).addTo(__map);
-  else __myMarker.setLatLng(ll);
+
+  if (!__myMarker) {
+    __myMarker = L.marker(ll, { icon: __myIcon || undefined }).addTo(__map);
+  } else {
+    __myMarker.setLatLng(ll);
+  }
+
+  // rotation based on movement direction
+  if (__prevLL) {
+    const br = bearingDeg(__prevLL, ll);
+    if (isFinite(br)) __lastBearing = br;
+  }
+  __prevLL = ll;
+  setTimeout(()=>setCarRotation(__lastBearing), 0);
 }
 
 function centerOnMe(){
@@ -439,7 +521,16 @@ async function loadMe(){
       show(accActions, false);
       return null;
     }
-    accEl.innerHTML = `Status: <b>${data.driver.status}</b><br>Balans: <b>${data.driver.balance} AZN</b> (blok həddi: ${data.blockAt})`;
+    // Softer account messaging (no scary "blocked" blast)
+    const st = String(data.driver.status||'—');
+    const bal = Number(data.driver.balance||0);
+    const blockAt = Number(data.blockAt);
+    const isBlocked = (st === 'blocked') || (isFinite(blockAt) && bal <= blockAt);
+    const statusLabel = isBlocked ? 'Məhdudiyyət var' : (st === 'approved' ? 'Aktiv' : st);
+    const statusNote = isBlocked
+      ? `Sifariş almaq üçün balansı ${isFinite(blockAt)?blockAt:'—'} AZN-dən yuxarı edin.`
+      : 'Sistemdən istifadə edə bilərsiniz.';
+    accEl.innerHTML = `Status: <b>${statusLabel}</b><br>Balans: <b>${bal.toFixed(2)} AZN</b> <span class="muted">(blok həddi: ${isFinite(blockAt)?blockAt:'—'})</span><br><span class="muted">${statusNote}</span>`;
 
     // visual stats (some are placeholders until backend exposes analytics)
     try{
