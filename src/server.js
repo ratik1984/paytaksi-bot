@@ -829,20 +829,7 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT r.*,
-            d.id as driver_id,
-            d.phone as driver_phone,
-            d.car_make as driver_car_make,
-            d.car_model as driver_car_model,
-            d.car_year as driver_car_year,
-            d.car_color as driver_car_color,
-            d.plate as driver_plate,
-            d.last_lat as driver_last_lat,
-            d.last_lon as driver_last_lon,
-            d.is_online as driver_is_online,
-            u.tg_id as driver_tg_id,
-            u.first_name as driver_first_name,
-            u.username as driver_username
+    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
@@ -1349,8 +1336,10 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
   const rideQ = await pool.query(
-    `UPDATE rides SET offered_driver_id=$1, offer_expires_at=NOW() + ($3 || ' seconds')::interval, updated_at=NOW()
+    `UPDATE rides
+     SET status='assigned', driver_id=$1, offered_driver_id=$1, offer_expires_at=NULL, updated_at=NOW()
      WHERE id=$2 AND status='searching'
+       AND (offered_driver_id IS NULL OR offered_driver_id=$1)
      RETURNING *`,
     [driver.id, ride_id]
   );

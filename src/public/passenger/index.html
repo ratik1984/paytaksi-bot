@@ -247,19 +247,10 @@
       if (pickup && !force) return pickup;
       setStatus('GPS oxunur…');
       return new Promise((resolve)=>{
-        let done = false;
-        const finish = (val)=>{ if(done) return; done = true; try{ clearTimeout(hardTmr); }catch(_){ } resolve(val); };
-        // Hard fallback: some WebViews never call either callback unless user taps.
-        const hardTmr = setTimeout(()=>{
-          setStatus('GPS icazəsi üçün "hədəf" düyməsinə toxunun (manual rejim).', false);
-          finish(null);
-        }, 8000);
-
         if (!navigator.geolocation){
           setStatus('Bu cihazda GPS yoxdur.', false);
-          return finish(null);
+          return resolve(null);
         }
-
         navigator.geolocation.getCurrentPosition(async (pos)=>{
           pickup = { lat: pos.coords.latitude, lon: pos.coords.longitude, text: 'Cari yer' };
           setMarker('pick', pickup.lat, pickup.lon);
@@ -268,19 +259,18 @@
           if (nm) pickup.text = nm;
           setStatus('Pick-up: '+pickup.text);
           validate();
-          finish(pickup);
+          resolve(pickup);
         }, (err)=>{
           setStatus('GPS icazəsi yoxdur. Telefonun Location icazəsini aktiv edin.', false);
           validate();
-          finish(null);
+          resolve(null);
         }, { enableHighAccuracy:true, timeout:12000, maximumAge:10000 });
       });
     }
 
-    }
-
     function validate(){
-      btnCreate.disabled = !(drop);}
+      btnCreate.disabled = !(pickup && drop);
+    }
 
     // --- Suggestions
     function showSuggest(items){
@@ -428,16 +418,6 @@
 
     async function createRide(){
       if (!pickup){ await ensurePickup(true); }
-      if (!pickup){
-        try{
-          const c = map.getCenter();
-          pickup = { lat: c.lat, lon: c.lng, text: 'Xəritə mərkəzi (manual)' };
-          setMarker('pick', pickup.lat, pickup.lon);
-          const nm = await reverseName(pickup.lat, pickup.lon);
-          if (nm) pickup.text = nm;
-          setStatus('Pick-up: '+pickup.text);
-        }catch(_){ }
-      }
       if (!pickup){ return; }
       if (!drop){ setStatus('Təyinat seçin.', false); return; }
       try{
@@ -484,13 +464,11 @@
 
     // Boot
     (async ()=>{
-      // Do NOT block UI on GPS: some Telegram WebViews require user gesture.
-      pollRides();
+      await ensurePickup(false);
+      await pollRides();
       pollTmr = setInterval(pollRides, 2500);
       validate();
-      // Try GPS in background (will auto-fallback after a few seconds)
-      ensurePickup(false);
     })();
-</script>
+  </script>
 </body>
 </html>
