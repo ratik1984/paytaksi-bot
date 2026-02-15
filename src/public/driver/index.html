@@ -525,11 +525,18 @@ async function loadMe(){
     const st = String(data.driver.status||'—');
     const bal = Number(data.driver.balance||0);
     const blockAt = Number(data.blockAt);
-    const isBlocked = (st === 'blocked') || (isFinite(blockAt) && bal <= blockAt);
-    const statusLabel = isBlocked ? 'Məhdudiyyət var' : (st === 'approved' ? 'Aktiv' : st);
-    const statusNote = isBlocked
+
+    const balanceBlocked = (isFinite(blockAt) && bal <= blockAt);
+    const manualBlocked = (st === 'blocked') && !balanceBlocked;
+    const isBlocked = manualBlocked || balanceBlocked;
+
+    const statusLabel = balanceBlocked
+      ? 'Məhdudiyyət var'
+      : (manualBlocked ? 'Bloklanıb' : (st === 'approved' ? 'Aktiv' : st));
+
+    const statusNote = balanceBlocked
       ? `Sifariş almaq üçün balansı ${isFinite(blockAt)?blockAt:'—'} AZN-dən yuxarı edin.`
-      : 'Sistemdən istifadə edə bilərsiniz.';
+      : (manualBlocked ? 'Hesabınız admin tərəfindən məhdudlaşdırılıb. Dəstəyə yazın.' : 'Sistemdən istifadə edə bilərsiniz.');
     accEl.innerHTML = `Status: <b>${statusLabel}</b><br>Balans: <b>${bal.toFixed(2)} AZN</b> <span class="muted">(blok həddi: ${isFinite(blockAt)?blockAt:'—'})</span><br><span class="muted">${statusNote}</span>`;
 
     // visual stats (some are placeholders until backend exposes analytics)

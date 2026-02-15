@@ -1405,7 +1405,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
   await pool.query('BEGIN');
   try {
     await pool.query(`UPDATE rides SET status='completed', updated_at=NOW() WHERE id=$1`, [ride_id]);
-    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, driver.id]);
+    await pool.query(`UPDATE drivers SET balance=$1, status=CASE WHEN status='approved' AND $1 <= ${DRIVER_BLOCK_AT} THEN 'blocked' ELSE status END WHERE id=$2`, [newBal, driver.id]);
     await pool.query('COMMIT');
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -1529,8 +1529,20 @@ app.post('/api/admin/driver_balance', adminAuth, async (req, res) => {
 
     const newBal = money2(Number(d.balance) + a);
     await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, d.id]);
+
+    // Auto-toggle driver status based on balance threshold (keeps UX consistent)
+    // If balance <= block limit and driver was approved -> blocked
+    // If driver was blocked due to balance and balance is now above limit -> approved
+    let newStatus = d.status;
+    const nb = Number(newBal);
+    if (d.status === 'approved' && nb <= DRIVER_BLOCK_AT) newStatus = 'blocked';
+    if (d.status === 'blocked' && nb > DRIVER_BLOCK_AT) newStatus = 'approved';
+    if (newStatus !== d.status) {
+      await pool.query(`UPDATE drivers SET status=$1 WHERE id=$2`, [newStatus, d.id]);
+    }
+
     await pool.query('COMMIT');
-    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, note: note || null });
+    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, status: newStatus, note: note || null });
   } catch (e) {
     await pool.query('ROLLBACK');
     return res.status(400).json({ ok: false, error: String(e.message || e) });
