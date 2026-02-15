@@ -801,27 +801,68 @@ app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req,
 
 // passenger: check ride status
 app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
+  // Uses PostgreSQL pool + real schema columns.
+  // Previous implementation referenced `db.*` and non-existent columns, causing 500 server_error.
   try {
-    const passenger_tg_id = String(req.tgUser.id);
-    const ride_id = Number(req.body.ride_id);
+    const ride_id = Number(req.body?.ride_id);
     if (!ride_id) return res.status(400).json({ ok: false, error: 'ride_id_required' });
 
-    const ride = await db.oneOrNone('SELECT * FROM rides WHERE id=$1 AND passenger_tg_id=$2', [ride_id, passenger_tg_id]);
-    if (!ride) return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    const passenger = await upsertUser(req.tgUser, 'passenger');
 
-    if (!['searching','assigned'].includes(ride.status)) {
+    await pool.query('BEGIN');
+    const rideQ = await pool.query(
+      `SELECT * FROM rides WHERE id=$1 AND passenger_user_id=$2 FOR UPDATE`,
+      [ride_id, passenger.id]
+    );
+    const ride = rideQ.rows[0];
+    if (!ride) {
+      await pool.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'ride_not_found' });
+    }
+
+    if (!['searching', 'assigned'].includes(ride.status)) {
+      await pool.query('ROLLBACK');
       return res.status(400).json({ ok: false, error: 'cannot_cancel', status: ride.status });
     }
 
-    await db.none("UPDATE rides SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [ride_id]);
+    const upd = await pool.query(
+      `UPDATE rides
+         SET status='cancelled', updated_at=NOW(), offered_driver_id=NULL, offer_expires_at=NULL
+       WHERE id=$1
+       RETURNING *`,
+      [ride_id]
+    );
 
-    if (ride.driver_tg_id) {
-      try { await sendTelegramToRole('driver', ride.driver_tg_id, `❌ Sifariş ləğv edildi (#${ride_id}).`); } catch (e) {}
-    }
+    // Audit (best-effort)
+    await pool.query(
+      `INSERT INTO ride_cancellations(ride_id, actor_role, actor_tg_id, reason)
+       VALUES ($1,'passenger',$2,$3)`,
+      [ride_id, Number(req.tgUser.id), 'passenger_cancel']
+    ).catch(() => {});
 
-    return res.json({ ok: true });
+    await pool.query('COMMIT');
+
+    // Notify driver (best-effort)
+    try {
+      if (upd.rows[0]?.driver_id) {
+        const dq = await pool.query(
+          `SELECT u.tg_id
+             FROM drivers d
+             JOIN users u ON u.id=d.user_id
+            WHERE d.id=$1`,
+          [upd.rows[0].driver_id]
+        );
+        const driverTg = dq.rows[0]?.tg_id;
+        if (driverTg) {
+          await sendTelegramToRole('driver', driverTg, `❌ Sifariş ləğv edildi (#${ride_id}).`);
+        }
+      }
+    } catch (_) {}
+
+    return res.json({ ok: true, ride: upd.rows[0] });
   } catch (e) {
-    console.error(e);
+    try { await pool.query('ROLLBACK'); } catch (_) {}
+    console.error('cancel_ride failed:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
@@ -829,9 +870,7 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username,
-            d.last_lat as driver_last_lat, d.last_lon as driver_last_lon,
-            d.car_make as driver_car_make, d.car_model as driver_car_model, d.car_color as driver_car_color, d.plate as driver_plate, d.car_year as driver_car_year
+    `SELECT r.*, d.id as driver_id, u.tg_id as driver_tg_id, u.first_name as driver_first_name, u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
@@ -1337,101 +1376,64 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  const id = Number(ride_id);
-  if (!id) return res.status(400).json({ ok:false, error:'ride_id_required' });
+  // Prevent accepting multiple rides.
+  const busyQ = await pool.query(
+    `SELECT id FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
+    [driver.id]
+  );
+  if (busyQ.rows[0]) return res.status(409).json({ ok: false, error: 'driver_busy' });
 
-  await ensureDispatchTables();
-  startOfferExpiryLoop();
-
-  // Atomic assign:
-  // - Ride must be 'searching'
-  // - If offered_driver_id exists, it must be this driver and not expired
-  // - Driver must not have an active ride
-  const client = await pool.connect();
-  try{
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(424243)'); // separate lock from dispatcher
-
-    const activeQ = await client.query(
-      `SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
-      [driver.id]
-    );
-    if (activeQ.rows[0]){
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok:false, error:'driver_has_active_ride' });
+  // Accept means: claim the ride (assigned + driver_id) if it's available.
+  // We allow accepting either:
+  // 1) an active offer to this driver (not expired)
+  // 2) an unoffered searching ride (fallback)
+  try {
+    await pool.query('BEGIN');
+    const r0 = await pool.query(`SELECT * FROM rides WHERE id=$1 FOR UPDATE`, [ride_id]);
+    const ride0 = r0.rows[0];
+    if (!ride0 || ride0.status !== 'searching') {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
     }
 
-    const rideQ = await client.query(
-      `SELECT id, status, offered_driver_id, offer_expires_at
-         FROM rides
-        WHERE id=$1
-        FOR UPDATE`,
-      [id]
-    );
-    const ride = rideQ.rows[0];
-    if (!ride || ride.status !== 'searching'){
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok:false, error:'ride_not_available' });
+    const offeredOk =
+      (ride0.offered_driver_id === null || ride0.offered_driver_id === undefined) ? true :
+      (Number(ride0.offered_driver_id) === Number(driver.id) && (!ride0.offer_expires_at || new Date(ride0.offer_expires_at).getTime() > Date.now()));
+
+    if (!offeredOk) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'not_offered_to_you' });
     }
 
-    // If another driver has an active offer, block acceptance.
-    if (ride.offered_driver_id && Number(ride.offered_driver_id) !== Number(driver.id)){
-      // Allow if offer expired (race); if expired, we'll clear and proceed.
-      const exp = ride.offer_expires_at ? new Date(ride.offer_expires_at).getTime() : 0;
-      if (exp && exp > Date.now()){
-        await client.query('ROLLBACK');
-        return res.status(409).json({ ok:false, error:'not_offered_to_you' });
-      }
-      await client.query(`UPDATE rides SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW() WHERE id=$1`, [id]);
-    }
-
-    // If offer was for this driver, ensure not expired
-    if (ride.offered_driver_id && Number(ride.offered_driver_id) === Number(driver.id)){
-      const exp = ride.offer_expires_at ? new Date(ride.offer_expires_at).getTime() : 0;
-      if (exp && exp < Date.now()){
-        await client.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'timeout')`, [id, driver.id]).catch(()=>{});
-        await client.query(`UPDATE rides SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW() WHERE id=$1`, [id]);
-        await client.query('COMMIT');
-        // Re-offer to someone else
-        try{ await autoAssignRide(id); }catch(_){}
-        return res.status(409).json({ ok:false, error:'offer_expired' });
-      }
-    }
-
-    const upd = await client.query(
+    const rideQ = await pool.query(
       `UPDATE rides
           SET driver_id=$1, status='assigned', offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW()
         WHERE id=$2 AND status='searching'
         RETURNING *`,
-      [driver.id, id]
+      [driver.id, ride_id]
     );
-    const assigned = upd.rows[0];
+    if (!rideQ.rows[0]) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
+    }
 
-    await client.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [id, driver.id]).catch(()=>{});
-    await client.query('COMMIT');
+    await pool.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+    await pool.query('COMMIT');
 
     // Notify passenger (best-effort)
-    try{
-      const pQ = await pool.query(
-        `SELECT u.tg_id
-           FROM rides r
-           JOIN users u ON u.id = r.passenger_user_id
-          WHERE r.id=$1`,
-        [id]
-      );
-      const passengerTg = pQ.rows[0]?.tg_id;
-      if (passengerTg){
-        await sendTelegramToRole('passenger', passengerTg, `✅ Sürücü sifarişi qəbul etdi (#${id}).`);
+    try {
+      const pq = await pool.query(`SELECT u.tg_id FROM rides r JOIN users u ON u.id=r.passenger_user_id WHERE r.id=$1`, [ride_id]);
+      const passengerTg = pq.rows[0]?.tg_id;
+      if (passengerTg) {
+        await sendTelegramToRole('passenger', passengerTg, `✅ Sifarişiniz qəbul edildi (#${ride_id}).`);
       }
-    }catch(_){}
+    } catch (_) {}
 
-    return res.json({ ok:true, ride: assigned });
-  }catch(e){
-    try{ await client.query('ROLLBACK'); }catch{}
-    console.error('driver accept failed:', e?.message || e);
-    return res.status(500).json({ ok:false, error:'server_error' });
-  }finally{
-    client.release();
+    return res.json({ ok: true, ride: rideQ.rows[0] });
+  } catch (e) {
+    try { await pool.query('ROLLBACK'); } catch (_) {}
+    console.error('driver accept failed:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
 
