@@ -1,369 +1,820 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="az">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
-  <title>PayTaksi Passenger</title>
+  <title>PayTaksi - Sərnişin</title>
 
+  <!-- Telegram WebApp -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Shared helpers (api(), tg user, pt token, etc.) -->
+  <script>window.__ROLE__='passenger';</script>
+  <script src="../assets/common.js"></script>
+
+  <!-- Leaflet (map). If CDN is blocked in Telegram WebView, we auto-fallback to "no-map" mode. -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
-    html, body { margin:0; padding:0; height:100%; background:#f5f5f5; }
-    #map { position: fixed; top: 0; left: 0; width: 100%; height: 100vh; z-index: 1; }
-
-    .topBtns {
-      position: fixed; top: 18px; left: 18px; right: 18px;
-      display: flex; justify-content: space-between; gap: 12px;
-      z-index: 2000; pointer-events: none;
+    :root{
+      --bg:#f5f6f8;
+      --card:#ffffff;
+      --text:#111827;
+      --muted:#6b7280;
+      --line:#e5e7eb;
+      --btn:#111111;
+      --danger:#b91c1c;
+      --radius:18px;
     }
-    .btnCircle{
-      width: 52px; height: 52px; border-radius: 999px;
-      background: #fff; box-shadow: 0 8px 20px rgba(0,0,0,.12);
-      display:flex; align-items:center; justify-content:center;
-      pointer-events: all; border: 0; font-size: 22px;
+    *{ box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+    html,body{ height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
+    #wrap{ position:fixed; inset:0; display:flex; flex-direction:column; }
+    #map{ position:absolute; inset:0; }
+    .topBtns{
+      position:absolute; top:14px; left:14px; right:14px;
+      display:flex; justify-content:space-between; pointer-events:none;
     }
+    .fab{ pointer-events:auto; width:52px; height:52px; border-radius:26px; border:0; background:rgba(255,255,255,.92); box-shadow:0 10px 24px rgba(0,0,0,.12); display:grid; place-items:center; }
+    .fab svg{ width:22px; height:22px; }
 
-    .panel {
-      position: fixed; left: 0; right: 0; bottom: 0;
-      background: #fff; border-radius: 22px 22px 0 0;
-      padding: 18px; z-index: 3000;
-      box-shadow: 0 -10px 25px rgba(0,0,0,.12);
+    .sheet{
+      position:absolute; left:0; right:0; bottom:0;
+      background:var(--card);
+      border-top-left-radius:24px;
+      border-top-right-radius:24px;
+      box-shadow:0 -14px 40px rgba(0,0,0,.18);
+      padding:10px 14px 18px;
+      touch-action: manipulation;
     }
-    .grab { width: 48px; height: 5px; background: #ddd; border-radius: 99px; margin: 0 auto 12px; }
-    h2 { margin: 0 0 12px 0; font-size: 34px; letter-spacing: -0.6px; }
-
-    .input {
-      width: 100%; box-sizing: border-box;
-      padding: 14px; border-radius: 12px;
-      border: 1px solid #e5e5e5; font-size: 16px; outline: none;
+    .grab{ width:46px; height:5px; border-radius:999px; background:#d1d5db; margin:6px auto 10px; }
+    h1{ font-size:34px; margin:6px 4px 10px; letter-spacing:-0.6px; }
+    .row{ display:flex; gap:10px; align-items:center; }
+    .input{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px 14px;
+      font-size:16px;
+      outline:none;
+      background:#fff;
     }
-
-    .hintRow { display:flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 13px; color: #666; }
-    .price { font-weight: 700; color: #111; }
-
-    .btnPrimary {
-      width: 100%; margin-top: 14px; padding: 16px 14px;
-      border: 0; border-radius: 14px;
-      background: #111; color: #fff; font-size: 16px; cursor: pointer;
+    .hint{ font-size:13px; color:var(--muted); margin:10px 6px 0; }
+    .btn{
+      width:100%;
+      border:0;
+      border-radius:16px;
+      padding:14px 16px;
+      font-size:18px;
+      font-weight:700;
+      background: linear-gradient(180deg, #111 0%, #000 100%);
+      color:#fff;
+      cursor:pointer;
+      box-shadow: 0 12px 26px rgba(0,0,0,.22);
     }
-    .btnPrimary:disabled{ opacity: .55; cursor: not-allowed; }
+    .btn:disabled{ opacity:.55; cursor:not-allowed; }
+    .btnDanger{ background:var(--danger); box-shadow:none; }
+    .btnGhost{ background:#111; color:#fff; }
 
-    .btnAlt {
-      width: 100%; margin-top: 10px; padding: 14px 14px;
-      border: 1px solid #e5e5e5; border-radius: 14px;
-      background: #fff; color: #111; font-size: 15px; cursor: pointer;
+    .suggestWrap{ position:relative; }
+    .suggest{
+      position:absolute; left:0; right:0; top:52px;
+      background:#fff; border:1px solid var(--line);
+      border-radius:14px; overflow:hidden; z-index:9999;
+      box-shadow:0 20px 40px rgba(0,0,0,.18);
+      max-height:260px; overflow:auto;
     }
+    .sItem{ padding:12px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+    .sItem:last-child{ border-bottom:0; }
+    .sTitle{ font-weight:650; }
+    .sSub{ color:var(--muted); font-size:12.5px; margin-top:3px; }
+    .status{ margin:10px 6px 0; font-size:14px; color:var(--muted); }
 
-    .toast {
-      position: fixed; left: 14px; right: 14px; bottom: 190px;
-      background: rgba(0,0,0,.72); color:#fff;
-      padding: 10px 12px; border-radius: 12px; font-size: 13px;
-      z-index: 4000; display:none;
+    .driverCard{
+      margin-top:10px;
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:12px;
     }
+    .dTop{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .dName{ font-weight:800; font-size:18px; }
+    .dMeta{ color:var(--muted); font-size:13px; margin-top:3px; }
+    .dBtns{ display:flex; gap:10px; margin-top:12px; }
+    .dBtns .btn{ font-size:16px; padding:12px 14px; border-radius:14px; box-shadow:none; }
+    .pill{ display:inline-block; font-size:12px; padding:4px 10px; border-radius:999px; background:#f3f4f6; color:#111; font-weight:700; }
 
-    .acBox { position: relative; z-index: 5000; }
-    .acList {
-      position: absolute; left: 0; right: 0; top: calc(100% + 8px);
-      background: #fff; border: 1px solid #eee; border-radius: 12px;
-      box-shadow: 0 10px 22px rgba(0,0,0,.12);
-      overflow: hidden; display: none; max-height: 230px; overflow-y: auto;
-    }
-    .acItem { padding: 12px; border-bottom: 1px solid #f3f3f3; cursor: pointer; font-size: 14px; color: #111; }
-    .acItem:last-child { border-bottom: 0; }
-    .acItem:hover { background: #f7f7f7; }
+    /* Bolt-like car markers */
+    .carPin{width:38px;height:38px;position:relative;filter: drop-shadow(0 10px 18px rgba(0,0,0,.32));}
+    .carShadow{position:absolute;left:50%;top:50%;transform:translate(-50%,-10%);width:22px;height:14px;border-radius:999px;background:rgba(0,0,0,.28);filter:blur(5px);}
+    .carBody{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) rotate(0deg);transform-origin:50% 50%;transition:transform .22s ease;}
+    .carSvg{width:34px;height:34px;display:block}
+
+    .priceRow{display:flex;align-items:center;justify-content:space-between;margin:10px 6px 0;gap:10px}
+    .priceRow .lbl{color:var(--muted);font-size:13px}
+    .priceRow .val{font-weight:900;font-size:18px}
+
+    /* keep room for Telegram bottom bar / phone nav */
+    .safePad{ height:12px; }
+
+    /* Tiny debug strip (only shown on errors) */
+    .debugStrip{position:fixed;left:10px;right:10px;top:10px;background:rgba(0,0,0,.82);color:#fff;padding:10px 12px;border-radius:14px;font-size:12px;display:none;z-index:10000;white-space:pre-wrap}
+
+    /* Fallback (no-map) UI */
+    #fallback{display:none;margin-top:10px}
+    #fallback input{width:100%;padding:14px;border-radius:18px;border:1px solid var(--line);font-size:16px;box-sizing:border-box}
+    .small{font-size:12px;color:var(--muted);margin-top:8px}
+    .sugs{margin-top:8px}
+    .sug{padding:10px 12px;border:1px solid var(--line);border-radius:14px;margin:8px 0;background:#fafafa;cursor:pointer}
+    .sug strong{display:block}
+    .sug span{display:block;font-size:12px;color:var(--muted);margin-top:2px}
   </style>
 </head>
 
 <body>
-  <div id="map"></div>
+  <div id="wrap">
+    <div id="map"></div>
 
-  <div class="topBtns">
-    <button class="btnCircle" id="menuBtn">☰</button>
-    <button class="btnCircle" id="locBtn" title="Mənim yerim">◎</button>
-  </div>
-
-  <div class="toast" id="toast"></div>
-
-  <div class="panel">
-    <div class="grab"></div>
-    <h2>Haraya?</h2>
-
-    <div class="acBox">
-      <input id="destination" class="input" type="text" placeholder="Təyinat yeri (məs: Əhmədli)" autocomplete="off" />
-      <div id="acList" class="acList"></div>
+    <div class="topBtns">
+      <button id="btnMenu" class="fab" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <button id="btnCenter" class="fab" aria-label="GPS">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="6"/></svg>
+      </button>
     </div>
 
-    <div class="hintRow">
-      <div id="gpsStatus">GPS oxunur...</div>
-      <div class="price" id="fareText">—</div>
-    </div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <h1 id="title">Haraya?</h1>
 
-    <button class="btnPrimary" id="orderBtn" disabled>Sifariş et</button>
-    <button class="btnAlt" id="driversBtn">3 km sürücüləri göstər</button>
+      <div class="suggestWrap">
+        <input id="destInput" class="input" placeholder="Təyinat yeri" autocomplete="off" />
+        <div id="destSuggest" class="suggest" style="display:none"></div>
+      </div>
+
+      <div style="height:10px"></div>
+
+      <div class="priceRow" id="priceRow" style="display:none">
+        <div class="lbl" id="priceLbl">Təxmini qiymət</div>
+        <div class="val" id="priceVal">—</div>
+      </div>
+
+      <button id="btnCreate" class="btn" disabled>Sifariş et</button>
+
+      <div id="status" class="status">GPS oxunur…</div>
+
+      <!-- Fallback UI (shown automatically if map fails to load in Telegram WebView) -->
+      <div id="fallback">
+        <div class="hint" style="margin-top:8px">
+          Xəritə yüklənmədi. Bu rejimdə sifarişi xəritəsiz verə bilərsiniz.
+        </div>
+        <div style="margin-top:10px">
+          <input id="pickupTxt" placeholder="Mövcud yeriniz (məs: 28 May, Nərimanov...)" autocomplete="off" />
+          <div class="sugs" id="pickupSuggestions"></div>
+        </div>
+        <div class="small">İpucu: əvvəlcə mövcud yeri seçin, sonra təyinatı seçin.</div>
+      </div>
+
+      <div id="driverCard" class="driverCard" style="display:none">
+        <div class="dTop">
+          <div>
+            <div class="dName" id="dName">Sürücü</div>
+            <div class="dMeta" id="dMeta">—</div>
+          </div>
+          <div class="pill" id="dEta" style="display:none">— dəq</div>
+        </div>
+        <div class="dBtns">
+          <button id="btnCall" class="btn btnGhost" type="button">Zəng</button>
+          <button id="btnMsg" class="btn btnGhost" type="button">Mesaj</button>
+          <button id="btnCancel" class="btn btnDanger" type="button">Ləğv et</button>
+        </div>
+        <div class="hint" id="dHint"></div>
+      </div>
+
+      <div class="safePad"></div>
+    </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <div class="debugStrip" id="debugStrip"></div>
+
+  <!-- Legacy panel is intentionally kept in codebase; this screen focuses on a stable Bolt-like flow. -->
 
   <script>
-    // ===== Utils
-    const toastEl = document.getElementById("toast");
-    function toast(msg, ms=2400){
-      toastEl.textContent = msg;
-      toastEl.style.display = "block";
-      clearTimeout(toastEl._t);
-      toastEl._t = setTimeout(()=>toastEl.style.display="none", ms);
+    // --- Small utils
+    const $ = (id)=>document.getElementById(id);
+    const statusEl = $('status');
+    const destInput = $('destInput');
+    const destSuggest = $('destSuggest');
+    const btnCreate = $('btnCreate');
+    const driverCard = $('driverCard');
+    const dName = $('dName');
+    const dMeta = $('dMeta');
+    const dEta = $('dEta');
+    const dHint = $('dHint');
+    const btnCall = $('btnCall');
+    const btnMsg = $('btnMsg');
+    const btnCancel = $('btnCancel');
+
+    const priceRow = $('priceRow');
+    const priceVal = $('priceVal');
+
+    const u = tgUser();
+    if (window.Telegram?.WebApp){
+      try{ window.Telegram?.WebApp?.expand?.(); }catch(_){ }
     }
 
-    function getPtToken(){
+    function haversineKm(a, b){
+      const R=6371;
+      const toRad=(x)=>x*Math.PI/180;
+      const dLat=toRad(b.lat-a.lat);
+      const dLon=toRad(b.lon-a.lon);
+      const s1=Math.sin(dLat/2);
+      const s2=Math.sin(dLon/2);
+      const q=s1*s1 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*s2*s2;
+      return 2*R*Math.asin(Math.sqrt(q));
+    }
+
+    // --- Debug / error visibility (helps when Telegram WebView hides console)
+    const debugStrip = $('debugStrip');
+    function showDebug(msg){
+      if (!debugStrip) return;
+      debugStrip.style.display = 'block';
+      debugStrip.textContent = String(msg).slice(0, 1200);
+    }
+    window.addEventListener('error', (e)=>{
+      showDebug('JS error: ' + (e?.message || e));
+    });
+    window.addEventListener('unhandledrejection', (e)=>{
+      showDebug('Promise error: ' + (e?.reason?.message || e?.reason || e));
+    });
+
+    // --- Map (can fail if Leaflet CDN blocked). If it fails, we fallback to "no-map" mode.
+    let map, pickMarker, dropMarker, drvMarker, line;
+    let mapReady = false;
+    function enableFallbackMode(reason){
+      try{ document.getElementById('mapWrap').style.display='none'; }catch(_){ }
+      try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
+      setStatus('Xəritə yüklənmədi. Manual rejim aktivdir.', false);
+      showDebug('Map disabled. Reason: ' + (reason||'unknown'));
+      mapReady = false;
+    }
+    function initMap(){
       try{
-        const u = new URL(location.href);
-        return u.searchParams.get("pt") || "";
-      }catch(e){ return ""; }
-    }
-    const PT = getPtToken();
-
-    function haversineKm(lat1, lon1, lat2, lon2) {
-      const R = 6371;
-      const toRad = (v) => v * Math.PI / 180;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a =
-        Math.sin(dLat/2) * Math.sin(dLat/2) +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-        Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
-    }
-
-    // Tarif: 0–3km = 3.50 AZN, sonra hər km 0.40 (yuvarlaqlaşdırma YOX)
-    function calcFare(distanceKm){
-      if (!isFinite(distanceKm) || distanceKm <= 0) return null;
-      if (distanceKm <= 3) return 3.50;
-      return 3.50 + (distanceKm - 3) * 0.40;
-    }
-
-    // ===== Map
-    const gpsStatus = document.getElementById("gpsStatus");
-    const destInput = document.getElementById("destination");
-    const acList = document.getElementById("acList");
-    const fareText = document.getElementById("fareText");
-    const orderBtn = document.getElementById("orderBtn");
-    const driversBtn = document.getElementById("driversBtn");
-    const locBtn = document.getElementById("locBtn");
-
-    const map = L.map('map', { zoomControl: true }).setView([40.4093, 49.8671], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
-
-    let myLatLng = null;
-    let myMarker = null;
-
-    let destLatLng = null;
-    let destMarker = null;
-
-    // drivers markers
-    let driverLayer = L.layerGroup().addTo(map);
-
-    function setMyLocation(lat, lng){
-      myLatLng = { lat, lng };
-      if (!myMarker){
-        myMarker = L.circleMarker([lat, lng], { radius: 7 }).addTo(map);
-        myMarker.bindPopup("Siz buradasınız");
-      } else {
-        myMarker.setLatLng([lat, lng]);
+        if (!window.L || typeof window.L.map !== 'function') {
+          enableFallbackMode('Leaflet yüklənmədi (CDN blok ola bilər)');
+          return;
+        }
+        map = L.map('map', { zoomControl:false, attributionControl:false });
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        map.setView([40.4093, 49.8671], 12); // Baku
+        mapReady = true;
+        // expose for add-on scripts (live cars)
+        window.__map = map;
+      } catch(err){
+        enableFallbackMode(err?.message || String(err));
       }
     }
+    initMap();
 
-    function setDestination(lat, lng, label){
-      destLatLng = { lat, lng, label };
-      if (!destMarker){
-        destMarker = L.marker([lat, lng]).addTo(map);
-      } else {
-        destMarker.setLatLng([lat, lng]);
+    function setMarker(which, lat, lon){
+      if (!mapReady) return;
+      if (!isFinite(lat)||!isFinite(lon)) return;
+      const ll=[lat,lon];
+      if (which==='pick'){
+        if (!pickMarker) pickMarker=L.circleMarker(ll,{radius:10}).addTo(map);
+        pickMarker.setLatLng(ll);
+      } else if (which==='drop'){
+        if (!dropMarker) dropMarker=L.marker(ll).addTo(map);
+        dropMarker.setLatLng(ll);
+      } else if (which==='drv'){
+        if (!drvMarker) drvMarker=L.marker(ll).addTo(map);
+        drvMarker.setLatLng(ll);
       }
-      if (label) destMarker.bindPopup(label);
-
-      if (myLatLng){
-        const km = haversineKm(myLatLng.lat, myLatLng.lng, lat, lng);
-        const fare = calcFare(km);
-        fareText.textContent = fare ? (fare.toFixed(2) + " AZN") : "—";
-      } else {
-        fareText.textContent = "—";
-      }
-      orderBtn.disabled = !(myLatLng && destLatLng);
+    }
+    function drawLine(p1, p2){
+      if (!mapReady) return;
+      try{ if (line){ map.removeLayer(line); line=null; } }catch(_){ }
+      if (!p1 || !p2) return;
+      line = L.polyline([[p1.lat,p1.lon],[p2.lat,p2.lon]], { weight: 5, opacity: 0.9 }).addTo(map);
+      map.fitBounds(line.getBounds(), { padding:[40,120] });
     }
 
-    // ===== GPS
-    function requestGPS(){
-      if (!navigator.geolocation){
-        gpsStatus.textContent = "GPS dəstəklənmir.";
-        toast("GPS dəstəklənmir.");
+    // --- State
+    let pickup=null;
+    let drop=null;
+    let activeRide=null;
+    let pollTmr=null;
+    let sugTmr=null;
+
+    function setStatus(msg, ok=true){
+      statusEl.textContent = msg;
+      statusEl.style.color = ok ? '' : 'crimson';
+    }
+
+    async function reverseName(lat, lon){
+      try{
+        const url = new URL('/api/reverse', location.origin);
+        url.searchParams.set('lat', String(lat));
+        url.searchParams.set('lon', String(lon));
+        const r = await fetch(url.toString());
+        const j = await r.json();
+        if (j?.ok && (j.name || j.display_name)) return (j.name || j.display_name);
+      }catch(_){ }
+      return '';
+    }
+
+    async function ensurePickup(force=false){
+      if (pickup && !force) return pickup;
+      setStatus('GPS oxunur…');
+      return new Promise((resolve)=>{
+        let done = false;
+        const finish = (val)=>{ if(done) return; done = true; try{ clearTimeout(hardTmr); }catch(_){ } resolve(val); };
+        // Hard fallback: some WebViews never call either callback unless user taps.
+        const hardTmr = setTimeout(()=>{
+          // Some WebViews never return geolocation until the user interacts.
+          if (!mapReady) {
+            try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
+            setStatus('GPS alınmadı. Mövcud yeri yazıb seçin (manual rejim).', false);
+          } else {
+            setStatus('GPS icazəsi üçün "hədəf" düyməsinə toxunun (manual rejim).', false);
+          }
+          finish(null);
+        }, 8000);
+
+        if (!navigator.geolocation){
+          setStatus('Bu cihazda GPS yoxdur.', false);
+          return finish(null);
+        }
+
+        navigator.geolocation.getCurrentPosition(async (pos)=>{
+          pickup = { lat: pos.coords.latitude, lon: pos.coords.longitude, text: 'Cari yer' };
+          window.__pickup = pickup;
+          setMarker('pick', pickup.lat, pickup.lon);
+          try{ map.setView([pickup.lat, pickup.lon], 16); }catch(_){ }
+          const nm = await reverseName(pickup.lat, pickup.lon);
+          if (nm) pickup.text = nm;
+          setStatus('Pick-up: '+pickup.text);
+          validate();
+          finish(pickup);
+        }, (err)=>{
+          if (!mapReady) {
+            try{ document.getElementById('fallback').style.display='block'; }catch(_){ }
+            setStatus('GPS icazəsi yoxdur. Mövcud yeri yazıb seçin (manual rejim).', false);
+          } else {
+            setStatus('GPS icazəsi yoxdur. Telefonun Location icazəsini aktiv edin.', false);
+          }
+          validate();
+          finish(null);
+        }, { enableHighAccuracy:true, timeout:12000, maximumAge:10000 });
+      });
+    }
+
+    function validate(){
+      // Creating a ride needs BOTH pickup + destination
+      btnCreate.disabled = !(pickup && drop) || !!activeRide;
+      window.__pickup = pickup;
+      window.__drop = drop;
+    }
+
+    // --- Suggestions
+    function showSuggest(items){
+      if (!items || !items.length){
+        destSuggest.style.display='none';
+        destSuggest.innerHTML='';
+        return;
+      }
+      destSuggest.innerHTML = items.map((it, idx)=>{
+        const title = (it.title||'').replace(/</g,'&lt;');
+        const sub = (it.subtitle||'').replace(/</g,'&lt;');
+        return `<div class="sItem" data-idx="${idx}"><div class="sTitle">${title}</div><div class="sSub">${sub}</div></div>`;
+      }).join('');
+      destSuggest.style.display='block';
+      // click handler (event delegation)
+      destSuggest.onclick = (e)=>{
+        const el = e.target.closest('.sItem');
+        if (!el) return;
+        const idx = Number(el.dataset.idx);
+        const it = items[idx];
+        if (!it) return;
+        drop = { lat: Number(it.lat), lon: Number(it.lon), text: it.title };
+        destInput.value = it.title;
+        destSuggest.style.display='none';
+        destSuggest.innerHTML='';
+        setMarker('drop', drop.lat, drop.lon);
+        if (pickup) drawLine(pickup, drop);
+        validate();
+      };
+    }
+
+    async function loadSuggestions(q){
+      try{
+        const url = new URL('/api/places', location.origin);
+        url.searchParams.set('q', q);
+        if (pickup){ url.searchParams.set('lat', String(pickup.lat)); url.searchParams.set('lon', String(pickup.lon)); }
+        const r = await fetch(url.toString());
+        const j = await r.json();
+        if (j?.ok) return j.items || [];
+      }catch(_){ }
+      return [];
+    }
+
+    destInput.addEventListener('input', ()=>{
+      const q = destInput.value.trim();
+      drop = null;
+      validate();
+      clearTimeout(sugTmr);
+      if (q.length < 3){ showSuggest([]); return; }
+      sugTmr = setTimeout(async ()=>{
+        const items = await loadSuggestions(q);
+        showSuggest(items);
+      }, 250);
+    });
+
+    // --- Fallback pickup suggestions (used when map is unavailable or GPS denied)
+    const pickupTxt = $('pickupTxt');
+    const pickupSug = $('pickupSuggestions');
+    let pickTmr = null;
+    function showPickupSuggest(items){
+      if (!pickupSug) return;
+      if (!items || !items.length){ pickupSug.innerHTML=''; return; }
+      pickupSug.innerHTML = items.slice(0,6).map((it, idx)=>{
+        const title = (it.title||'').replace(/</g,'&lt;');
+        const sub = (it.subtitle||'').replace(/</g,'&lt;');
+        return `<div class="sug" data-idx="${idx}"><strong>${title}</strong><span>${sub}</span></div>`;
+      }).join('');
+      pickupSug.onclick = (e)=>{
+        const el = e.target.closest('.sug');
+        if (!el) return;
+        const idx = Number(el.dataset.idx);
+        const it = items[idx];
+        if (!it) return;
+        pickup = { lat: Number(it.lat), lon: Number(it.lon), text: it.title };
+        if (pickupTxt) pickupTxt.value = it.title;
+        pickupSug.innerHTML='';
+        // If map exists, reflect markers; otherwise just proceed
+        setMarker('pick', pickup.lat, pickup.lon);
+        if (drop) drawLine(pickup, drop);
+        setStatus('Mövcud yer seçildi', true);
+        validate();
+      };
+    }
+    async function loadPickupSuggestions(q){
+      try{
+        const url = new URL('/api/places', location.origin);
+        url.searchParams.set('q', q);
+        const r = await fetch(url.toString());
+        const j = await r.json();
+        if (j?.ok) return j.items || [];
+      }catch(_){ }
+      return [];
+    }
+    if (pickupTxt){
+      pickupTxt.addEventListener('input', ()=>{
+        const q = pickupTxt.value.trim();
+        pickup = null;
+        validate();
+        clearTimeout(pickTmr);
+        if (q.length < 3){ showPickupSuggest([]); return; }
+        pickTmr = setTimeout(async ()=>{
+          const items = await loadPickupSuggestions(q);
+          showPickupSuggest(items);
+        }, 250);
+      });
+    }
+    document.addEventListener('click', (e)=>{
+      if (!destSuggest.contains(e.target) && e.target !== destInput){
+        destSuggest.style.display='none';
+      }
+    });
+
+    // --- Ride lifecycle
+    function activeFromList(rides){
+      if (!Array.isArray(rides)) return null;
+      return rides.find(r => ['searching','assigned','started'].includes(String(r.status))) || null;
+    }
+
+    function renderDriver(r){
+      const hasDriver = !!r?.driver_id;
+      if (!hasDriver){
+        driverCard.style.display='none';
         return;
       }
 
-      gpsStatus.textContent = "GPS oxunur...";
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          setMyLocation(lat, lng);
-          map.setView([lat, lng], 15);
-          gpsStatus.textContent = "GPS hazırdır.";
-          orderBtn.disabled = !(myLatLng && destLatLng);
-        },
-        () => {
-          gpsStatus.textContent = "GPS icazəsi yoxdur.";
-          toast("GPS icazəsi verilmədi. Telefon ayarlarından Location aç.");
-        },
-        { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
-      );
+      const name = r.driver_first_name || 'Sürücü';
+      const username = r.driver_username ? '@'+r.driver_username : '';
+      const plate = r.driver_plate || '';
+      const car = [r.driver_car_make, r.driver_car_model, r.driver_car_color, r.driver_car_year].filter(Boolean).join(' · ');
+      const phone = r.driver_phone || '';
 
-      navigator.geolocation.watchPosition(
-        (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          setMyLocation(lat, lng);
-          if (destLatLng){
-            const km = haversineKm(myLatLng.lat, myLatLng.lng, destLatLng.lat, destLatLng.lng);
-            const fare = calcFare(km);
-            fareText.textContent = fare ? (fare.toFixed(2) + " AZN") : "—";
-          }
-        },
-        () => {},
-        { enableHighAccuracy: true, maximumAge: 2000, timeout: 12000 }
-      );
-    }
-    requestGPS();
+      dName.textContent = name;
+      dMeta.textContent = [username, plate, car].filter(Boolean).join('  •  ') || '—';
+      dHint.textContent = phone ? ('Telefon: '+phone) : (r.driver_tg_id ? ('Telegram: tg:'+r.driver_tg_id) : '');
 
-    locBtn.addEventListener("click", () => {
-      if (myLatLng) map.setView([myLatLng.lat, myLatLng.lng], 15);
-      else toast("GPS hələ hazır deyil.");
-    });
-
-    // ===== Autocomplete (Nominatim, AZ)
-    let acData = [];
-    let acTimer = null;
-
-    function hideList(){ acList.style.display = "none"; acList.innerHTML = ""; }
-    function showList(items){
-      if (!items || !items.length) { hideList(); return; }
-      acList.innerHTML = items.map((it, idx) => `<div class="acItem" data-idx="${idx}">${it.label}</div>`).join("");
-      acList.style.display = "block";
-    }
-
-    async function nominatimSearch(q){
-      const url = "https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=az&accept-language=az&q=" + encodeURIComponent(q);
-      const res = await fetch(url, { headers: { "Accept": "application/json" }});
-      const json = await res.json();
-      return (json || []).map(x => ({
-        label: x.display_name,
-        lat: parseFloat(x.lat),
-        lon: parseFloat(x.lon)
-      })).filter(x => isFinite(x.lat) && isFinite(x.lon));
-    }
-
-    destInput.addEventListener("input", () => {
-      const q = destInput.value.trim();
-      if (acTimer) clearTimeout(acTimer);
-      if (q.length < 3){ hideList(); return; }
-
-      acTimer = setTimeout(async () => {
-        try{
-          const items = await nominatimSearch(q);
-          acData = items;
-          showList(items);
-        }catch(e){
-          hideList();
-        }
-      }, 350);
-    });
-
-    acList.addEventListener("click", (e) => {
-      const item = e.target.closest(".acItem");
-      if (!item) return;
-      const idx = parseInt(item.getAttribute("data-idx"), 10);
-      const sel = acData[idx];
-      if (!sel) return;
-      destInput.value = sel.label;
-      hideList();
-      setDestination(sel.lat, sel.lon, "Təyinat");
-      map.setView([sel.lat, sel.lon], 14);
-    });
-
-    document.addEventListener("click", (e) => { if (!e.target.closest(".acBox")) hideList(); });
-
-    // ===== Show drivers (3km) using passenger API (requires Telegram auth via pt)
-    driversBtn.addEventListener("click", async () => {
-      if (!myLatLng) { toast("GPS hazır deyil."); return; }
-      if (!PT) { toast("pt token yoxdur. Telegram içindən aç."); return; }
-
-      try{
-        const url = `/api/passenger/nearby_drivers?lat=${encodeURIComponent(myLatLng.lat)}&lon=${encodeURIComponent(myLatLng.lng)}&radius_km=3&pt=${encodeURIComponent(PT)}`;
-        const res = await fetch(url);
-        const j = await res.json();
-
-        if (!j.ok){
-          toast("API xətası: " + (j.reason || j.error || "unknown"));
-          return;
-        }
-
-        const drivers = j.drivers || [];
-        driverLayer.clearLayers();
-
-        if (!drivers.length){
-          toast("3 km-də online sürücü tapılmadı.");
-          return;
-        }
-
-        drivers.forEach(d => {
-          L.circleMarker([d.lat, d.lon], { radius: 6 }).addTo(driverLayer)
-            .bindPopup("Sürücü #" + d.id);
-        });
-
-        toast(`Tapıldı: ${drivers.length} sürücü`);
-      }catch(e){
-        toast("Driver siyahısı alınmadı (server xətası).");
+      // ETA best-effort
+      let eta=null;
+      const dl = Number(r.driver_last_lat);
+      const dn = Number(r.driver_last_lon);
+      if (pickup && isFinite(dl) && isFinite(dn)){
+        const km = haversineKm({lat:dl, lon:dn}, {lat:Number(r.pickup_lat), lon:Number(r.pickup_lon)});
+        eta = Math.max(1, Math.round((km/25)*60));
       }
-    });
+      if (eta){ dEta.style.display='inline-block'; dEta.textContent = eta+' dəq'; }
+      else { dEta.style.display='none'; }
 
-    // ===== Order ride (real backend)
-    orderBtn.addEventListener("click", async () => {
-      if (!myLatLng) { toast("GPS hazır deyil."); return; }
-      if (!destLatLng) { toast("Təyinat seçilməyib."); return; }
-      if (!PT) { toast("pt token yoxdur. Telegram içindən aç."); return; }
-
-      const km = haversineKm(myLatLng.lat, myLatLng.lng, destLatLng.lat, destLatLng.lng);
-      const fare = calcFare(km);
-
-      const payload = {
-        pt: PT,
-        pickup_lat: myLatLng.lat,
-        pickup_lon: myLatLng.lng,
-        pickup_text: "Pickup",
-        drop_lat: destLatLng.lat,
-        drop_lon: destLatLng.lng,
-        drop_text: destLatLng.label || destInput.value
+      // Buttons
+      btnCall.onclick = ()=>{
+        if (phone){ location.href = 'tel:'+String(phone).replace(/\s+/g,''); return; }
+        if (r.driver_tg_id){
+          // Telegram user id can't be opened directly, but we keep hint
+          setStatus('Telefon yoxdur. Telegram ID: '+r.driver_tg_id, false);
+          return;
+        }
+        setStatus('Əlaqə məlumatı yoxdur.', false);
+      };
+      btnMsg.onclick = ()=>{
+        if (r.driver_username){ location.href = 'https://t.me/'+r.driver_username; return; }
+        if (r.driver_tg_id){ setStatus('Mesaj üçün username yoxdur. Telegram ID: '+r.driver_tg_id, false); return; }
+        setStatus('Mesaj üçün məlumat yoxdur.', false);
       };
 
-      try{
-        const res = await fetch("/api/passenger/create_ride", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        const j = await res.json();
-        if (!j.ok){
-          toast("Sifariş alınmadı: " + (j.reason || j.error || "unknown"));
-          return;
-        }
-        toast("Sifariş göndərildi. Qiymət: " + (fare ? fare.toFixed(2) : "—") + " AZN");
-        console.log("ride:", j.ride);
-      }catch(e){
-        toast("Sifariş göndərilmədi (server xətası).");
+      driverCard.style.display='';
+    }
+
+    function renderRide(r){
+      if (!r){
+        renderDriver(null);
+        setStatus(pickup ? ('Pick-up: '+pickup.text) : 'GPS oxunur…');
+        return;
       }
+      const st = String(r.status);
+      if (st === 'searching') setStatus('Yaxın sürücülərə təklif göndərilir…');
+      if (st === 'assigned') setStatus('Sürücü təyin edildi. Təsdiq gözlənilir…');
+      if (st === 'started') setStatus('Sürücü yoldadır…');
+
+      // map markers
+      setMarker('pick', Number(r.pickup_lat), Number(r.pickup_lon));
+      setMarker('drop', Number(r.drop_lat), Number(r.drop_lon));
+      drawLine({lat:Number(r.pickup_lat), lon:Number(r.pickup_lon)}, {lat:Number(r.drop_lat), lon:Number(r.drop_lon)});
+      if (isFinite(Number(r.driver_last_lat)) && isFinite(Number(r.driver_last_lon))){
+        setMarker('drv', Number(r.driver_last_lat), Number(r.driver_last_lon));
+      }
+      renderDriver(r);
+    }
+
+    async function pollRides(){
+      try{
+        const j = await api('/api/passenger/my_rides');
+        activeRide = activeFromList(j.rides);
+        renderRide(activeRide);
+      }catch(e){
+        // keep UI usable even if backend temporarily fails
+        setStatus('Server əlaqəsi kəsildi. Yenidən yoxlanılır…', false);
+      }
+    }
+
+    async function createRide(){
+      if (!pickup){ await ensurePickup(true); }
+      if (!pickup){
+        try{
+          const c = map.getCenter();
+          pickup = { lat: c.lat, lon: c.lng, text: 'Xəritə mərkəzi (manual)' };
+          setMarker('pick', pickup.lat, pickup.lon);
+          const nm = await reverseName(pickup.lat, pickup.lon);
+          if (nm) pickup.text = nm;
+          setStatus('Pick-up: '+pickup.text);
+        }catch(_){ }
+      }
+      if (!pickup){ return; }
+      if (!drop){ setStatus('Təyinat seçin.', false); return; }
+      try{
+        btnCreate.disabled = true;
+        setStatus('Sifariş yaradılır…');
+        const j = await api('/api/passenger/create_ride', { method:'POST', body:{
+          pickup_lat: pickup.lat, pickup_lon: pickup.lon, pickup_text: pickup.text,
+          drop_lat: drop.lat, drop_lon: drop.lon, drop_text: drop.text
+        }});
+        activeRide = j.ride;
+        renderRide(activeRide);
+        // Start polling
+        if (pollTmr) clearInterval(pollTmr);
+        pollTmr = setInterval(pollRides, 2000);
+      }catch(e){
+        setStatus('Xəta: '+(e?.data?.error||e?.message||'server_error'), false);
+      }finally{
+        validate();
+      }
+    }
+
+    async function cancelRide(){
+      if (!activeRide?.id){ setStatus('Aktiv gediş yoxdur.', false); return; }
+      try{
+        setStatus('Ləğv edilir…');
+        await api('/api/passenger/cancel_ride', { method:'POST', body:{ ride_id: Number(activeRide.id) }});
+        activeRide = null;
+        renderRide(null);
+        // refresh
+        await pollRides();
+      }catch(e){
+        setStatus('Ləğv xətası: '+(e?.data?.error||e?.message||'server_error'), false);
+      }
+    }
+
+    // Buttons
+    btnCreate.addEventListener('click', createRide);
+    btnCancel.addEventListener('click', cancelRide);
+    $('btnCenter').addEventListener('click', ()=>ensurePickup(true));
+    $('btnMenu').addEventListener('click', ()=>{
+      // Keep simple: open Telegram settings / close app
+      try{ window.Telegram?.WebApp?.openTelegramLink?.('https://t.me'); }catch(_){ }
     });
 
-    document.getElementById("menuBtn").addEventListener("click", () => toast("Menu (sonra əlavə edəcəyik)"));
+    // Boot
+    (async ()=>{
+      // Do NOT block UI on GPS: some Telegram WebViews require user gesture.
+      pollRides();
+      pollTmr = setInterval(pollRides, 2500);
+      validate();
+      // Try GPS in background (will auto-fallback after a few seconds)
+      ensurePickup(false);
+    })();
+</script>
 
+  <script>
+    // ---- Bolt-like Live Drivers (cars on the map)
+    // Works via SSE when pt token exists; falls back to polling.
+    let liveMapReady = false;
+    let carLayer = null;
+    let cars = new Map(); // id -> { marker, last:{lat,lon,t}, target:{lat,lon,t}, rot }
+    let animTimer = null;
+    let sse = null;
+
+    function makeCarIcon(){
+      const html = `
+        <div class="carPin">
+          <div class="carShadow"></div>
+          <div class="carBody">
+            <svg class="carSvg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4.5 13.5 6 8.9c.3-.9 1.1-1.5 2-1.5h8c.9 0 1.7.6 2 1.5l1.5 4.6" stroke="#111" stroke-width="1.6" stroke-linecap="round"/>
+              <path d="M5 13.5h14" stroke="#111" stroke-width="1.6" stroke-linecap="round"/>
+              <path d="M6.3 16.8a1.3 1.3 0 0 1-1.3-1.3v-2a1.7 1.7 0 0 1 1.7-1.7h10.6A1.7 1.7 0 0 1 19 13.5v2a1.3 1.3 0 0 1-1.3 1.3" stroke="#111" stroke-width="1.6" stroke-linecap="round"/>
+              <circle cx="7.4" cy="16.9" r="1.4" fill="#111"/>
+              <circle cx="16.6" cy="16.9" r="1.4" fill="#111"/>
+              <path d="M8 10.2h8" stroke="#111" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>`;
+      return L.divIcon({ className:'', html, iconSize:[38,38], iconAnchor:[19,19] });
+    }
+
+    function setCarRotation(marker, deg){
+      try{
+        const el = marker.getElement();
+        const body = el && el.querySelector('.carBody');
+        if (body) body.style.transform = `translate(-50%,-50%) rotate(${deg}deg)`;
+      }catch(_){ }
+    }
+
+    function bearingDeg(a, b){
+      const toRad = (d)=>d*Math.PI/180;
+      const toDeg = (r)=>r*180/Math.PI;
+      const y = Math.sin(toRad(b.lon-a.lon)) * Math.cos(toRad(b.lat));
+      const x = Math.cos(toRad(a.lat))*Math.sin(toRad(b.lat)) - Math.sin(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.cos(toRad(b.lon-a.lon));
+      let brng = toDeg(Math.atan2(y,x));
+      brng = (brng + 360) % 360;
+      return brng;
+    }
+
+    function upsertCar(d){
+      if (!liveMapReady || !carLayer) return;
+      const id = Number(d.id);
+      const lat = Number(d.lat);
+      const lon = Number(d.lon);
+      if (!isFinite(id) || !isFinite(lat) || !isFinite(lon)) return;
+
+      const now = Date.now();
+      const existing = cars.get(id);
+      if (!existing){
+        const marker = L.marker([lat, lon], { icon: makeCarIcon(), interactive:false });
+        marker.addTo(carLayer);
+        cars.set(id, { marker, last:{lat,lon,t:now}, target:{lat,lon,t:now}, rot:0 });
+        return;
+      }
+      const prev = existing.target || existing.last;
+      existing.last = { ...prev };
+      existing.target = { lat, lon, t: now };
+      // rotate towards direction
+      const deg = bearingDeg(existing.last, existing.target);
+      existing.rot = deg;
+      setCarRotation(existing.marker, deg);
+    }
+
+    function removeCar(id){
+      const d = cars.get(Number(id));
+      if (!d) return;
+      try{ carLayer && carLayer.removeLayer(d.marker); }catch(_){ }
+      cars.delete(Number(id));
+    }
+
+    function startAnim(){
+      if (animTimer) return;
+      animTimer = setInterval(()=>{
+        const t = Date.now();
+        for (const [id, d] of cars){
+          const last = d.last;
+          const target = d.target;
+          const dt = Math.max(1, target.t - last.t);
+          const p = Math.min(1, (t - last.t) / dt);
+          const lat = last.lat + (target.lat - last.lat) * p;
+          const lon = last.lon + (target.lon - last.lon) * p;
+          try{ d.marker.setLatLng([lat, lon]); }catch(_){ }
+        }
+      }, 100);
+    }
+
+    async function pollDrivers(){
+      try{
+        const data = await api('/api/passenger/live_drivers');
+        const ids = new Set();
+        (data.drivers||[]).forEach((d)=>{ ids.add(Number(d.id)); upsertCar(d); });
+        // remove stale markers (not in snapshot)
+        for (const id of Array.from(cars.keys())){
+          if (!ids.has(id)) removeCar(id);
+        }
+      }catch(_){ }
+    }
+
+    function connectSSE(){
+      try{
+        const pt = ptToken();
+        if (!pt || typeof EventSource === 'undefined') return false;
+        const url = `/sse/drivers?pt=${encodeURIComponent(pt)}`;
+        sse = new EventSource(url);
+        sse.addEventListener('snapshot', (ev)=>{
+          try{
+            const msg = JSON.parse(ev.data||'{}');
+            const ids = new Set();
+            (msg.drivers||[]).forEach((d)=>{ ids.add(Number(d.id)); upsertCar(d); });
+            for (const id of Array.from(cars.keys())) if (!ids.has(id)) removeCar(id);
+          }catch(_){ }
+        });
+        sse.addEventListener('upsert', (ev)=>{
+          try{ upsertCar(JSON.parse(ev.data||'{}')); }catch(_){ }
+        });
+        sse.addEventListener('remove', (ev)=>{
+          try{ const m = JSON.parse(ev.data||'{}'); removeCar(m.id); }catch(_){ }
+        });
+        sse.onerror = ()=>{
+          // Fallback to polling if SSE is blocked
+          try{ sse.close(); }catch(_){ }
+          sse = null;
+        };
+        return true;
+      }catch(_){ return false; }
+    }
+
+    // Hook into map creation in the main script
+    (function waitForLeaflet(){
+      const t0 = Date.now();
+      const timer = setInterval(()=>{
+        if (window.__map && window.L){
+          clearInterval(timer);
+          liveMapReady = true;
+          carLayer = L.layerGroup().addTo(window.__map);
+          startAnim();
+          const ok = connectSSE();
+          if (!ok) {
+            pollDrivers();
+            setInterval(pollDrivers, 6000);
+          }
+        }
+        if (Date.now() - t0 > 12000) clearInterval(timer);
+      }, 200);
+    })();
+  </script>
+
+  <script>
+    // ---- Price estimate (automatic)
+    // This script piggy-backs on the existing pickup/drop selection variables.
+    // The main passenger script sets window.__pickup and window.__drop when ready.
+    let __lastEstKey = '';
+    async function updateEstimate(){
+      try{
+        const p = window.__pickup;
+        const d = window.__drop;
+        if (!p || !d || !isFinite(p.lat) || !isFinite(p.lon) || !isFinite(d.lat) || !isFinite(d.lon)){
+          priceRow.style.display='none';
+          return;
+        }
+        const key = `${p.lat.toFixed(5)},${p.lon.toFixed(5)}_${d.lat.toFixed(5)},${d.lon.toFixed(5)}`;
+        if (key === __lastEstKey) return;
+        __lastEstKey = key;
+        const est = await api('/api/passenger/estimate', { method:'POST', body:{ pickup_lat:p.lat, pickup_lon:p.lon, drop_lat:d.lat, drop_lon:d.lon } });
+        if (!est.ok) return;
+        priceRow.style.display='flex';
+        priceVal.textContent = `${Number(est.fare).toFixed(2)} ₼`;
+      }catch(_){ }
+    }
+    setInterval(updateEstimate, 900);
   </script>
 </body>
 </html>

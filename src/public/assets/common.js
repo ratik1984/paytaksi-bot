@@ -1,6 +1,14 @@
 function tgInitData() {
   // Telegram injects initData. Fallback empty for local dev.
-  return (window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) ? Telegram.WebApp.initData : "";
+  // IMPORTANT: some Android WebViews expose Telegram only on window.Telegram
+  // (not as a global "Telegram" variable), so always read from window.Telegram.
+  try {
+    return (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)
+      ? window.Telegram.WebApp.initData
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 function ptToken() {
@@ -11,7 +19,13 @@ function ptToken() {
   }
 }
 function tgUser() {
-  return (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user) ? Telegram.WebApp.initDataUnsafe.user : null;
+  try {
+    return (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user)
+      ? window.Telegram.WebApp.initDataUnsafe.user
+      : null;
+  } catch {
+    return null;
+  }
 }
 function setStatus(el, msg, ok=true){
   el.textContent = msg;
