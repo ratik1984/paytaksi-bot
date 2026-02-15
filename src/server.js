@@ -322,7 +322,20 @@ if (passengerBot) {
   passengerBot.start(async (ctx) => {
     const pt = signPtToken(ctx.from.id, 'passenger');
     const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
-    await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Sifariş et', url));
+    await ctx.reply('PayTaksi 🚕\nSərnişin paneli açılır:', webAppButton('🚕 Taksi Sifariş Ver', url));
+  });
+
+  // If user deletes keyboard or needs it again
+  passengerBot.command('menu', async (ctx) => {
+    const pt = signPtToken(ctx.from.id, 'passenger');
+    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    await ctx.reply('PayTaksi 🚕\nAşağıdakı düymə ilə paneli açın:', webAppButton('🚕 Taksi Sifariş Ver', url));
+  });
+
+  passengerBot.hears([/taksi/i, /sifari[sş]/i], async (ctx) => {
+    const pt = signPtToken(ctx.from.id, 'passenger');
+    const url = `${APP_BASE_URL}/app/passenger/?pt=${encodeURIComponent(pt)}`;
+    await ctx.reply('PayTaksi 🚕\nPanel düyməsi yeniləndi:', webAppButton('🚕 Taksi Sifariş Ver', url));
   });
 }
 
