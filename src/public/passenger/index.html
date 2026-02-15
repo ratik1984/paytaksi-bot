@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PayTaksi Passenger</title>
+<title>PayTaksi</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
@@ -31,6 +31,16 @@ html, body {
   padding: 20px;
   z-index: 1000;
 }
+
+button {
+  width: 100%;
+  padding: 15px;
+  background: black;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 16px;
+}
 </style>
 </head>
 
@@ -40,26 +50,6 @@ html, body {
 
 <div class="panel">
   <h2>Haraya?</h2>
-  <input type="text" placeholder="Təyinat yeri" style="width:100%;padding:10px;">
+  <input id="destination" type="text" placeholder="Təyinat yeri" style="width:100%;padding:10px;">
   <br><br>
-  <button style="width:100%;padding:15px;background:#000;color:#fff;border:none;border-radius:10px;">
-    Sifariş et
-  </button>
-</div>
-
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-<script>
-document.addEventListener("DOMContentLoaded", function () {
-
-  const map = L.map('map').setView([40.4093, 49.8671], 13);
-
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
-
-});
-</script>
-
-</body>
-</html>
+  <button onclick="orderRide()">Sifariş
