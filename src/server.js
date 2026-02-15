@@ -19,6 +19,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// --- Stability guards (PRO hotfix) ---
+// Express v4 does NOT automatically catch rejected promises from async route handlers.
+// Use asyncWrap() for async handlers to prevent server crashes and "bad_json" on clients.
+const asyncWrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
 app.use(helmet({ contentSecurityPolicy: false })); // Telegram WebApp needs relaxed CSP for MVP
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -1017,7 +1029,7 @@ app.get('/api/places', async (req, res) => {
 });
 
 // ---- Passenger: create ride
-app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req, res) => {
+app.post('/api/passenger/create_ride', requireTelegram('passenger'), asyncWrap(async (req, res) => {
   const { pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text } = req.body || {};
   if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((v) => typeof v !== 'number')) {
     return res.status(400).json({ ok: false, error: 'bad_coords' });
@@ -1076,10 +1088,10 @@ if (isFreeRide) {
     console.error('autoAssignRide failed (non-fatal):', e?.message || e);
   }
   res.json({ ok: true, ride });
-});
+}));
 
 // passenger: check ride status
-app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req, res) => {
+app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), asyncWrap(async (req, res) => {
   // Uses PostgreSQL pool + real schema columns.
   // Previous implementation referenced `db.*` and non-existent columns, causing 500 server_error.
   try {
@@ -1144,7 +1156,7 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
     console.error('cancel_ride failed:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
-});
+}));
 
 // Unified "active ride" endpoint used by newer passenger/driver UIs.
 // Frontend may call /api/active-ride or /active-ride. Keep both for compatibility.
@@ -1395,7 +1407,7 @@ app.get('/api/driver/session_me', requireTelegram('driver'), requireDriverSessio
 });
 
 // driver: set online/offline (if drivers.is_online exists)
-app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { online, lat, lon } = req.body || {};
   const want = !!online;
   const hasCols = await driversHaveOnlineCols();
@@ -1461,11 +1473,11 @@ app.post('/api/driver/set_online', requireTelegram('driver'), requireDriverSessi
     console.error('set_online failed', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
-});
+}));
 
 // driver: update last known location (GPS ping)
 // Used for "nearest rides" sorting and (optionally) nearest dispatch.
-app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { lat, lon, accuracy } = req.body || {};
   const hasLoc = await driversHaveLocationCols();
   if (!hasLoc) return res.json({ ok:true, applied:false });
@@ -1511,7 +1523,7 @@ app.post('/api/driver/location', requireTelegram('driver'), requireDriverSession
     console.error('driver/location failed', e);
     return res.status(500).json({ ok:false, error:'server_error' });
   }
-});
+}));
 
 // driver: list nearest open rides (requires last_lat/last_lon)
 app.get('/api/driver/nearby_rides', requireTelegram('driver'), requireDriverSession, async (req, res) => {
@@ -1751,7 +1763,7 @@ app.get('/api/driver/open_rides', requireTelegram('driver'), requireDriverSessio
 });
 
 // driver: accept ride
-app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -1819,11 +1831,11 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
     console.error('driver accept failed:', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
-});
+}));
 
 
 // driver: reject offered ride (or free up an active offer) and re-offer to someone else
-app.post('/api/driver/reject', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/reject', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -1844,10 +1856,10 @@ app.post('/api/driver/reject', requireTelegram('driver'), requireDriverSession, 
   try{ await autoAssignRide(Number(ride_id)); }catch(_){}
 
   return res.json({ ok:true });
-});
+}));
 
 // driver: start
-app.post('/api/driver/start', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/start', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -1860,10 +1872,10 @@ app.post('/api/driver/start', requireTelegram('driver'), requireDriverSession, a
   );
   if (!q.rows[0]) return res.status(409).json({ ok: false, error: 'cannot_start' });
   res.json({ ok: true, ride: q.rows[0] });
-});
+}));
 
 // driver: complete (apply 10% commission to driver balance)
-app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession, async (req, res) => {
+app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession, asyncWrap(async (req, res) => {
   const { ride_id } = req.body || {};
   const user = await upsertUser(req.tgUser, 'driver');
   const dQ = await pool.query(`SELECT * FROM drivers WHERE user_id=$1`, [user.id]);
@@ -1888,7 +1900,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
   }
 
   res.json({ ok: true, commission, new_balance: newBal, blocked: newBal <= DRIVER_BLOCK_AT });
-});
+}));
 
 // driver: topup request (manual approval)
 app.post('/api/driver/topup_request', requireTelegram('driver'), requireDriverSession, async (req, res) => {
@@ -2089,7 +2101,7 @@ app.post('/api/admin/topup_review', adminAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/admin/rides', adminAuth, async (req, res) => {
+app.get('/api/admin/rides', adminAuth, asyncWrap(async (req, res) => {
   const q = await pool.query(
     `SELECT r.*, pu.tg_id as passenger_tg_id, pu.first_name as passenger_name,
             du.tg_id as driver_tg_id, du.first_name as driver_name
@@ -2100,6 +2112,16 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
      ORDER BY r.id DESC LIMIT 200`
   );
   res.json({ ok: true, rides: q.rows });
+}));
+
+// --- Unified error handler (ensures JSON for /api/*) ---
+app.use((err, req, res, next) => {
+  console.error('[express_error]', err);
+  if (res.headersSent) return next(err);
+  if (req.path && req.path.startsWith('/api/')) {
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+  res.status(500).send('Server error');
 });
 
 // ---- Start server
