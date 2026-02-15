@@ -829,27 +829,25 @@ app.post('/api/passenger/cancel_ride', requireTelegram('passenger'), async (req,
 app.get('/api/passenger/my_rides', requireTelegram('passenger'), async (req, res) => {
   const passenger = await upsertUser(req.tgUser, 'passenger');
   const q = await pool.query(
-    `SELECT 
-        r.*,
-        d.id as driver_id,
-        d.phone as driver_phone,
-        d.car_make as driver_car_make,
-        d.car_model as driver_car_model,
-        d.car_year as driver_car_year,
-        d.car_color as driver_car_color,
-        d.plate as driver_plate,
-        d.last_lat as driver_last_lat,
-        d.last_lon as driver_last_lon,
-        d.last_loc_at as driver_last_loc_at,
-        u.tg_id as driver_tg_id,
-        u.first_name as driver_first_name,
-        u.username as driver_username
+    `SELECT r.*, 
+            d.id as driver_id,
+            d.phone as driver_phone,
+            d.plate as driver_plate,
+            d.car_make as driver_car_make,
+            d.car_model as driver_car_model,
+            d.car_year as driver_car_year,
+            d.car_color as driver_car_color,
+            d.last_lat as driver_last_lat,
+            d.last_lon as driver_last_lon,
+            u.tg_id as driver_tg_id,
+            u.first_name as driver_first_name,
+            u.username as driver_username
      FROM rides r
      LEFT JOIN drivers d ON d.id = r.driver_id
      LEFT JOIN users u ON u.id = d.user_id
      WHERE r.passenger_user_id=$1
      ORDER BY r.id DESC
-     LIMIT 20`,
+     LIMIT 10`,
     [passenger.id]
   );
   res.json({ ok: true, rides: q.rows });
@@ -1349,67 +1347,74 @@ app.post('/api/driver/accept', requireTelegram('driver'), requireDriverSession, 
   if (driver.status !== 'approved') return res.status(403).json({ ok: false, error: 'not_approved' });
   if (Number(driver.balance) <= DRIVER_BLOCK_AT) return res.status(403).json({ ok: false, error: 'balance_blocked' });
 
-  // Accept flow:
-  // - If ride is already offered to this driver (offered_driver_id = driver.id) -> assign it.
-  // - If ride is not offered to anyone (offered_driver_id IS NULL) -> allow first-come assignment.
-  // This makes passenger immediately see assigned driver (Bolt-like behavior).
-  await pool.query('BEGIN');
-  try{
-    const cur = await pool.query(
-      `SELECT id, status, offered_driver_id, offer_expires_at
-       FROM rides
-       WHERE id=$1
-       FOR UPDATE`,
+  // IMPORTANT: Accept must assign the ride (status='assigned' + driver_id). Otherwise passenger keeps seeing "searching".
+  // Also enforce that the offer belongs to this driver and is unexpired.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const busyQ = await client.query(
+      `SELECT 1 FROM rides WHERE driver_id=$1 AND status IN ('assigned','started') LIMIT 1`,
+      [driver.id]
+    );
+    if (busyQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'driver_busy' });
+    }
+
+    const rideLock = await client.query(
+      `SELECT id, status, offered_driver_id, offer_expires_at, passenger_user_id
+       FROM rides WHERE id=$1 FOR UPDATE`,
       [ride_id]
     );
-    const r = cur.rows[0];
-    if (!r || String(r.status) !== 'searching') {
-      await pool.query('ROLLBACK');
-      return res.status(409).json({ ok:false, error:'ride_not_available' });
+    const ride = rideLock.rows[0];
+    if (!ride || ride.status !== 'searching') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
     }
 
-    const offeredId = r.offered_driver_id == null ? null : Number(r.offered_driver_id);
-    if (offeredId !== null && offeredId !== Number(driver.id)) {
-      await pool.query('ROLLBACK');
-      return res.status(409).json({ ok:false, error:'ride_not_offered_to_you' });
+    const expOk = ride.offer_expires_at && new Date(ride.offer_expires_at).getTime() > Date.now();
+    if (Number(ride.offered_driver_id) !== Number(driver.id) || !expOk) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'not_offered_to_you' });
     }
 
-    // If offer exists and is expired, treat it as free.
-    const exp = r.offer_expires_at ? new Date(r.offer_expires_at).getTime() : 0;
-    if (offeredId !== null && exp && exp < Date.now()) {
-      // free the offer for assignment
-      await pool.query(
-        `UPDATE rides SET offered_driver_id=NULL, offer_expires_at=NULL, updated_at=NOW() WHERE id=$1`,
-        [ride_id]
-      );
-    }
-
-    const rideQ = await pool.query(
+    const rideQ = await client.query(
       `UPDATE rides
-       SET driver_id=$2,
+       SET driver_id=$1,
            status='assigned',
            offered_driver_id=NULL,
            offer_expires_at=NULL,
            updated_at=NOW()
-       WHERE id=$1 AND status='searching' AND (offered_driver_id IS NULL OR offered_driver_id=$2)
+       WHERE id=$2 AND status='searching'
        RETURNING *`,
-      [ride_id, driver.id]
+      [driver.id, ride_id]
     );
-    if (!rideQ.rows[0]) {
-      await pool.query('ROLLBACK');
-      return res.status(409).json({ ok:false, error:'ride_not_available' });
+    const updated = rideQ.rows[0];
+    if (!updated) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'ride_not_available' });
     }
 
-    await pool.query('COMMIT');
-    await pool.query(
-      `INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`,
-      [ride_id, driver.id]
-    ).catch(()=>{});
-    return res.json({ ok:true, ride: rideQ.rows[0] });
-  }catch(e){
-    try{ await pool.query('ROLLBACK'); }catch{}
-    console.error('driver/accept failed', e);
-    return res.status(500).json({ ok:false, error:'server_error' });
+    await client.query(`INSERT INTO ride_offer_attempts(ride_id, driver_id, decision) VALUES ($1,$2,'accept')`, [ride_id, driver.id]).catch(()=>{});
+    await client.query('COMMIT');
+
+    // Best-effort passenger notification
+    try {
+      const pQ = await pool.query(`SELECT tg_id FROM users WHERE id=$1`, [updated.passenger_user_id]);
+      const passengerTgId = pQ.rows[0]?.tg_id;
+      if (passengerTgId) {
+        await sendTelegramToRole('passenger', passengerTgId, `✅ Sürücü sifarişi qəbul etdi (#${updated.id}).`);
+      }
+    } catch {}
+
+    return res.json({ ok: true, ride: updated });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    console.error('driver accept failed:', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1472,7 +1477,7 @@ app.post('/api/driver/complete', requireTelegram('driver'), requireDriverSession
   await pool.query('BEGIN');
   try {
     await pool.query(`UPDATE rides SET status='completed', updated_at=NOW() WHERE id=$1`, [ride_id]);
-    await pool.query(`UPDATE drivers SET balance=$1, status=CASE WHEN status='approved' AND $1 <= ${DRIVER_BLOCK_AT} THEN 'blocked' ELSE status END WHERE id=$2`, [newBal, driver.id]);
+    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, driver.id]);
     await pool.query('COMMIT');
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -1596,20 +1601,8 @@ app.post('/api/admin/driver_balance', adminAuth, async (req, res) => {
 
     const newBal = money2(Number(d.balance) + a);
     await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, d.id]);
-
-    // Auto-toggle driver status based on balance threshold (keeps UX consistent)
-    // If balance <= block limit and driver was approved -> blocked
-    // If driver was blocked due to balance and balance is now above limit -> approved
-    let newStatus = d.status;
-    const nb = Number(newBal);
-    if (d.status === 'approved' && nb <= DRIVER_BLOCK_AT) newStatus = 'blocked';
-    if (d.status === 'blocked' && nb > DRIVER_BLOCK_AT) newStatus = 'approved';
-    if (newStatus !== d.status) {
-      await pool.query(`UPDATE drivers SET status=$1 WHERE id=$2`, [newStatus, d.id]);
-    }
-
     await pool.query('COMMIT');
-    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, status: newStatus, note: note || null });
+    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, note: note || null });
   } catch (e) {
     await pool.query('ROLLBACK');
     return res.status(400).json({ ok: false, error: String(e.message || e) });
