@@ -1,0 +1,417 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi - Sərnişin</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="../assets/common.js"></script>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:14px}
+    .card{border:1px solid #e6e6e6;border-radius:14px;padding:12px;margin:10px 0}
+    input,button,select{width:100%;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:16px}
+    button{border:none;background:#111;color:#fff}
+    .row{display:grid;grid-template-columns:1fr;gap:8px}
+    .muted{color:#666;font-size:13px}
+    .list{margin-top:8px}
+    .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
+    .btnSmall{padding:8px 10px;border-radius:10px;border:0;background:#b00020;color:#fff;font-size:14px;width:auto}
+    .actions{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+    /* Cancel reason modal */
+    .modalBack{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:16px;z-index:9999}
+    .modal{background:#fff;border-radius:16px;max-width:520px;width:100%;padding:14px;border:1px solid #e6e6e6}
+    .modal h3{margin:6px 0 10px 0;font-size:18px}
+    .modal .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .modal textarea{width:100%;min-height:72px;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:15px;resize:vertical}
+    .btnGhost{background:#eee;color:#111}
+  </style>
+</head>
+<body>
+  <h2>PayTaksi 🚕</h2>
+  <div class="muted" id="who"></div>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnLoc">📍 Mövcud yerimi avtomatik tap</button>
+      <div class="muted" id="locTxt">Yer: —</div>
+
+      <input id="pickupTxt" placeholder="Mövcud yeriniz (GPS ilə avtomatik yazılacaq)" />
+      <div class="list" id="pickupSuggestions"></div>
+
+      <input id="dest" placeholder="Gedəcəyiniz yeri yazın (məs: Nizami metro)" />
+      <div class="list" id="suggestions"></div>
+
+      <button id="btnCreate">🚕 Sifariş ver</button>
+      <div class="muted" id="status">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>Son sifarişlər</b>
+    <div class="list" id="rides"></div>
+  </div>
+
+  <!-- Cancel reason modal -->
+  <div class="modalBack" id="cancelBack">
+    <div class="modal">
+      <h3>❌ Sifarişi ləğv et</h3>
+      <div class="muted" id="cancelInfo">—</div>
+      <div class="row" style="margin-top:10px">
+        <select id="cancelReason">
+          <option value="">Səbəb seçin</option>
+          <option>Sürücü gecikir</option>
+          <option>Fikrim dəyişdi</option>
+          <option>Yanlış ünvan seçdim</option>
+          <option>Qiymət uyğun deyil</option>
+          <option>Digər…</option>
+        </select>
+        <textarea id="cancelNote" placeholder="Digər səbəb (istəyə bağlı)" style="display:none"></textarea>
+        <div class="two">
+          <button id="cancelNo" class="btnGhost">Geri</button>
+          <button id="cancelYes" class="btnSmall" style="width:100%">Ləğv et</button>
+        </div>
+        <div class="muted">Ləğv etdikdə (əgər sürücü təyin olunubsa) sürücüyə bildiriş gedəcək.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+Telegram.WebApp.ready();
+Telegram.WebApp.expand();
+
+const who = document.getElementById('who');
+const statusEl = document.getElementById('status');
+const locTxt = document.getElementById('locTxt');
+const ridesEl = document.getElementById('rides');
+const suggEl = document.getElementById('suggestions');
+const pickupInput = document.getElementById('pickupTxt');
+const pickupSuggEl = document.getElementById('pickupSuggestions');
+
+const u = tgUser();
+who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : 'Local dev mode';
+
+let lastDistanceKm = 0;
+
+function haversineKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const lat1 = a.lat * Math.PI / 180;
+  const lat2 = b.lat * Math.PI / 180;
+  const x = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function calcFare(distanceKm) {
+  const base = 3.50;
+  if (!distanceKm || distanceKm <= 0) return base;
+  if (distanceKm <= 3) return base;
+  return base + (distanceKm - 3) * 0.40;
+}
+function updateFareUI() {
+  const el = document.getElementById('fareInfo');
+  if (!el) return;
+  if (!pickup || !drop) { el.textContent = ''; lastDistanceKm = 0; return; }
+  const km = haversineKm({lat:pickup.lat, lon:pickup.lon}, {lat:drop.lat, lon:drop.lon});
+  lastDistanceKm = km;
+  const fare = calcFare(km);
+  el.textContent = `Məsafə: ${km.toFixed(2)} km • Təxmini məbləğ: ${fare.toFixed(2)} AZN`;
+}
+
+let pickup = null;
+let drop = null;
+
+document.getElementById('btnLoc').onclick = () => {
+  setStatus(statusEl,'GPS sorğusu…');
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
+    pickup = { lat: pos.coords.latitude, lon: pos.coords.longitude, text: 'Mənim yerim' };
+    locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)} (tapılır…)`;
+
+    // Mövcud yerin adını tap (reverse geocode)
+    try{
+      const url = new URL('/api/reverse', location.origin);
+      url.searchParams.set('lat', pickup.lat);
+      url.searchParams.set('lon', pickup.lon);
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.ok && (j.name || j.display_name)){
+        pickup.text = j.name || j.display_name;
+        locTxt.textContent = `Yer: ${pickup.text}`;
+        pickupInput.value = pickup.text;
+      } else {
+        locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+        pickupInput.value = '';
+      }
+    }catch(e){
+      locTxt.textContent = `Yer: ${pickup.lat.toFixed(5)}, ${pickup.lon.toFixed(5)}`;
+      pickupInput.value = '';
+    }
+
+    setStatus(statusEl,'Yer tapıldı ✅');
+  }, (err)=>{
+    setStatus(statusEl,'GPS icazəsi verilmədi ❌', false);
+  }, { enableHighAccuracy:true, timeout:10000 });
+};
+
+// --- Autocomplete helper
+async function loadSuggestions(q, listEl, onPick){
+  if (!q || q.length < 3){ listEl.innerHTML=''; return; }
+  try{
+    const url = new URL('/api/places', location.origin);
+    url.searchParams.set('q', q);
+    if (pickup){ url.searchParams.set('lat', pickup.lat); url.searchParams.set('lon', pickup.lon); }
+    const r = await fetch(url);
+    const data = await r.json();
+    listEl.innerHTML = '';
+    (data.items||[]).forEach((it)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.textContent = it.title;
+      div.onclick = ()=> onPick(it);
+      listEl.appendChild(div);
+    });
+  }catch(e){ listEl.innerHTML=''; }
+}
+
+let tmrPick = null;
+pickupInput.addEventListener('input', (e)=>{
+  clearTimeout(tmrPick);
+  const q = e.target.value.trim();
+  tmrPick = setTimeout(()=>{
+    loadSuggestions(q, pickupSuggEl, (it)=>{
+      // Allow user to override pickup by selecting a nearby place
+      pickup = { lat: it.lat, lon: it.lon, text: it.title };
+      pickupInput.value = it.title;
+      locTxt.textContent = `Yer: ${it.title}`;
+      pickupSuggEl.innerHTML='';
+    });
+  }, 250);
+});
+
+
+let tmr = null;
+document.getElementById('dest').addEventListener('input', (e)=>{
+  clearTimeout(tmr);
+  const q = e.target.value.trim();
+  if (q.length < 3){ suggEl.innerHTML=''; drop=null; return; }
+  tmr = setTimeout(async ()=>{
+    loadSuggestions(q, suggEl, (it)=>{
+      drop = { lat: it.lat, lon: it.lon, text: it.title };
+      document.getElementById('dest').value = it.title;
+      suggEl.innerHTML='';
+    });
+  }, 250);
+});
+
+document.getElementById('btnCreate').onclick = async ()=>{
+  if (!pickup) return setStatus(statusEl,'Əvvəlcə yerinizi tapın (GPS).', false);
+  if (!drop) return setStatus(statusEl,'Gedəcəyiniz yeri seçin.', false);
+  try{
+    setStatus(statusEl,'Sifariş yaradılır…');
+    const data = await api('/api/passenger/create_ride',{method:'POST',body:{
+      pickup_lat: pickup.lat, pickup_lon: pickup.lon, pickup_text: pickup.text,
+      drop_lat: drop.lat, drop_lon: drop.lon, drop_text: drop.text,
+      distance_km: lastDistanceKm
+    }});
+    setStatus(statusEl,`Sifariş #${data.ride.id} yaradıldı. Təxmini qiymət: ${data.ride.fare} AZN (komissiya: ${data.ride.commission} AZN)`);
+    await loadRides();
+  }catch(e){
+    setStatus(statusEl,'Xəta: '+(e.data?.reason||e.data?.error||e.message), false);
+  }
+};
+
+async function loadRides(){
+  try{
+    const data = await api('/api/passenger/my_rides');
+    ridesEl.innerHTML='';
+    (data.rides||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      const drv = r.driver_id ? `Sürücü: ${r.driver_first_name || ''} (@${r.driver_username||'-'})` : 'Sürücü: —';
+      const canCancel = (r.status === 'searching' || r.status === 'assigned');
+      const canViewChat = (r.driver_id && ['assigned','started','completed','cancelled'].includes(String(r.status)));
+      const canSendChat = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
+      const canCall = (r.driver_id && (r.status === 'assigned' || r.status === 'started'));
+      div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
+        ${r.pickup_text||''} → ${r.drop_text||''}<br>
+        Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN<br>
+        <span class="muted">${drv}</span>
+        ${canViewChat ? `
+          <div class="actions" style="margin-top:8px">
+            <button class="btnSmall" data-chat="${r.id}">${canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)'}</button>
+            ${canCall ? `<button class="btnSmall" data-call="${r.id}">📞 Sürücüyə zəng</button>` : ''}
+          </div>
+          <div class="card" data-chatbox="${r.id}" style="display:none;margin-top:8px;border-radius:12px;padding:10px">
+            <div class="muted" style="margin-bottom:6px">${canSendChat ? 'Yazışma yalnız sürücü qəbul edəndən sonra aktiv olur.' : 'Bu yazışma arxivdir (yalnız oxu).'}</div>
+            <div data-msglist style="max-height:220px;overflow:auto;border:1px dashed #ddd;border-radius:12px;padding:8px"></div>
+            ${canSendChat ? `
+              <div class="row" style="margin-top:8px">
+                <input data-msgtext placeholder="Mesaj yaz…" />
+                <button class="btnSmall" data-send>Göndər</button>
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+        ${canCancel ? `<div class="actions"><button class="btnSmall" data-cancel="${r.id}">❌ Ləğv et</button><span class="muted">(Sifarişin ləğv edilməsi sürücüyə bildiriləcək)</span></div>` : ''}`;
+      ridesEl.appendChild(div);
+
+      if (canCancel){
+        const btn = div.querySelector('[data-cancel]');
+        btn.onclick = async ()=>{
+          const reason = await openCancelModal(r);
+          if (reason === null) return;
+          try{
+            btn.disabled = true;
+            await api('/api/passenger/cancel_ride',{method:'POST',body:{ride_id: Number(r.id), reason}});
+            setStatus(statusEl,`Sifariş #${r.id} ləğv edildi ✅`);
+            await loadRides();
+          }catch(e){
+            setStatus(statusEl,'Ləğv edilə bilmədi: '+(e.data?.error||e.message), false);
+          }finally{ btn.disabled = false; }
+        };
+      }
+
+      if (canViewChat){
+        // Call (Telegram) - only while active
+        const bCall = div.querySelector('[data-call]');
+        if (bCall) {
+          bCall.onclick = ()=>{
+            openTelegramUser({ tg_id: r.driver_tg_id, username: r.driver_username });
+          };
+        }
+
+        // Chat toggle
+        const bChat = div.querySelector('[data-chat]');
+        const box = div.querySelector('[data-chatbox]');
+        const list = box.querySelector('[data-msglist]');
+        const input = box.querySelector('[data-msgtext]');
+        const bSend = box.querySelector('[data-send]');
+
+        let chatTimer = null;
+        let lastRendered = 0;
+
+        async function refreshChat(){
+          try{
+            const data = await api('/api/passenger/ride_messages?ride_id='+encodeURIComponent(r.id));
+            const msgs = data.messages || [];
+            if (!msgs.length){
+              list.innerHTML = '<div class="muted">Hələ mesaj yoxdur.</div>';
+              return;
+            }
+            // Render only if changed
+            const lastId = msgs[msgs.length-1].id || 0;
+            if (lastId === lastRendered) return;
+            lastRendered = lastId;
+            list.innerHTML = '';
+            msgs.forEach((m)=>{
+              const mine = m.sender_role === 'passenger';
+              const divm = document.createElement('div');
+              divm.style.margin = '6px 0';
+              divm.style.textAlign = mine ? 'right' : 'left';
+              divm.innerHTML = `<span style="display:inline-block;max-width:88%;padding:8px 10px;border-radius:12px;border:1px solid #e6e6e6;${mine?'background:#111;color:#fff;border-color:#111':''}">${escapeHtml(m.message)}</span>`;
+              list.appendChild(divm);
+            });
+            list.scrollTop = list.scrollHeight;
+          }catch(e){}
+        }
+
+        bChat.onclick = async ()=>{
+          const open = box.style.display !== 'none';
+          if (open){
+            box.style.display = 'none';
+            bChat.textContent = canSendChat ? '💬 Yazışma' : '📜 Yazışma (arxiv)';
+            if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+            return;
+          }
+          box.style.display = '';
+          bChat.textContent = '✖ Bağla';
+          await refreshChat();
+          chatTimer = setInterval(refreshChat, 3000);
+        };
+
+        if (bSend){
+          bSend.onclick = async ()=>{
+            const text = String(input.value||'').trim();
+            if (!text) return;
+            bSend.disabled = true;
+            try{
+              await api('/api/passenger/send_message',{method:'POST',body:{ride_id:Number(r.id), message:text}});
+              input.value='';
+              await refreshChat();
+            }catch(e){
+              alert('Xəta: '+(e.data?.error||e.data?.reason||e.message));
+            }finally{ bSend.disabled = false; }
+          };
+        }
+      }
+    });
+    if (!data.rides?.length) ridesEl.innerHTML = '<div class="muted">Hələ sifariş yoxdur.</div>';
+  }catch(e){}
+}
+
+function escapeHtml(s){
+  return String(s||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function openTelegramUser(user){
+  const tg_id = user?.tg_id;
+  const username = user?.username;
+  const url = username ? `https://t.me/${encodeURIComponent(username)}` : `tg://user?id=${encodeURIComponent(String(tg_id||''))}`;
+  try{
+    if (Telegram?.WebApp?.openTelegramLink) Telegram.WebApp.openTelegramLink(url);
+    else window.open(url,'_blank');
+  }catch{ window.open(url,'_blank'); }
+}
+loadRides();
+setInterval(loadRides, 4000);
+
+// ---- Cancel modal helpers
+const cancelBack = document.getElementById('cancelBack');
+const cancelInfo = document.getElementById('cancelInfo');
+const cancelReason = document.getElementById('cancelReason');
+const cancelNote = document.getElementById('cancelNote');
+const cancelNo = document.getElementById('cancelNo');
+const cancelYes = document.getElementById('cancelYes');
+
+cancelReason.addEventListener('change', ()=>{
+  const v = String(cancelReason.value||'');
+  cancelNote.style.display = (v && v.startsWith('Digər')) ? '' : 'none';
+});
+
+function openCancelModal(ride){
+  return new Promise((resolve)=>{
+    cancelInfo.innerHTML = `<b>#${ride.id}</b> • ${ride.pickup_text||''} → ${ride.drop_text||''}`;
+    cancelReason.value = '';
+    cancelNote.value = '';
+    cancelNote.style.display = 'none';
+    cancelBack.style.display = 'flex';
+
+    const close = (val)=>{
+      cancelBack.style.display = 'none';
+      cancelNo.onclick = null;
+      cancelYes.onclick = null;
+      resolve(val);
+    };
+
+    cancelNo.onclick = ()=> close(null);
+    cancelBack.onclick = (e)=>{ if (e.target === cancelBack) close(null); };
+    cancelYes.onclick = ()=>{
+      const sel = String(cancelReason.value||'').trim();
+      if (!sel) { alert('Səbəb seçin.'); return; }
+      let text = sel;
+      if (sel.startsWith('Digər')) {
+        const note = String(cancelNote.value||'').trim();
+        if (note) text = note;
+      }
+      close(text.slice(0,200));
+    };
+  });
+}
+</script>
+</body>
+</html>

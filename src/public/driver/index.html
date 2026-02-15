@@ -1,0 +1,963 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi - Sürücü</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="../assets/common.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root{
+      --bg:#0b0f14;
+      --panel:#111826;
+      --panel2:#0f1722;
+      --text:#e7eef8;
+      --muted:#9aa7b8;
+      --line:#1f2a3a;
+      --card:#121b2a;
+      --accent:#1bb66a;
+      --danger:#b00020;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;background:var(--bg);color:var(--text);overflow:hidden}
+
+    /* Map */
+    #mapWrap{position:relative;height:46vh;min-height:300px;background:#0a0f16}
+    #map{position:absolute;inset:0}
+    .mapBtn{position:absolute;width:46px;height:46px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(10,16,24,.75);backdrop-filter: blur(6px);color:var(--text);display:flex;align-items:center;justify-content:center;font-size:20px}
+    .mapBtn:active{transform:scale(.98)}
+    #btnMenu{left:14px;top:14px}
+    #btnShield{right:14px;top:14px}
+    #btnCenter{right:14px;top:74px}
+    #btnFilters{right:14px;top:134px}
+
+    /* Big online pill */
+    #onlinePill{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);width:min(520px,calc(100% - 28px));height:54px;border-radius:999px;border:none;font-size:18px;font-weight:700;letter-spacing:.2px}
+    #onlinePill.online{background:var(--accent);color:#0b0f14;box-shadow:0 10px 30px rgba(27,182,106,.25)}
+    #onlinePill.offline{background:#1a2536;color:var(--text);border:1px solid rgba(255,255,255,.08)}
+
+    /* Bottom sheet */
+    #sheet{position:absolute;left:0;right:0;bottom:0;height:54vh;
+      background:linear-gradient(180deg, rgba(15,23,34,.84), rgba(15,23,34,.96));
+      border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid rgba(255,255,255,.08);
+      overflow:hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 -18px 60px rgba(0,0,0,.55);
+    }
+    #sheetHandle{width:44px;height:5px;border-radius:999px;background:rgba(255,255,255,.22);margin:10px auto 8px auto}
+    #sheetInner{height:100%;overflow:auto;padding:0 14px 80px 14px}
+
+    /* Cards */
+    .card{background:rgba(18,27,42,.92);border:1px solid rgba(255,255,255,.06);border-radius:18px;padding:12px;margin:10px 0}
+    .cardTitle{font-weight:800;font-size:14px;letter-spacing:.2px;display:flex;align-items:center;justify-content:space-between}
+    .muted{color:var(--muted);font-size:13px}
+    .row{display:grid;grid-template-columns:1fr;gap:10px}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .hide{display:none}
+    .danger{background:var(--danger)}
+
+    input,select,button{font-size:16px}
+    input,select{width:100%;padding:12px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.08);background:rgba(7,12,18,.55);color:var(--text)}
+    button{width:100%;padding:12px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.08);background:#0d1522;color:var(--text)}
+    button.primary{background:var(--accent);color:#0b0f14;border:none;font-weight:800}
+    button.ghost{background:transparent}
+
+    .statGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+    .stat{background:rgba(9,14,22,.55);border:1px solid rgba(255,255,255,.06);border-radius:18px;padding:12px;min-height:90px}
+    .stat .label{color:var(--muted);font-size:13px}
+    .stat .value{font-size:28px;font-weight:900;margin-top:8px}
+    .stat .sub{margin-top:8px;color:var(--muted);font-size:12px}
+
+    .item{padding:10px;border:1px dashed rgba(255,255,255,.15);border-radius:14px;margin:8px 0}
+
+    /* Bottom nav */
+    #bottomNav{position:absolute;left:0;right:0;bottom:0;height:64px;background:rgba(10,14,20,.92);border-top:1px solid rgba(255,255,255,.08);display:grid;grid-template-columns:repeat(4,1fr);padding:6px 8px;gap:6px}
+    .navBtn{border:none;background:transparent;color:var(--muted);border-radius:14px;font-size:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+    .navBtn.active{background:rgba(27,182,106,.12);color:var(--text)}
+    .navIco{font-size:18px;line-height:18px}
+
+    /* Leaflet tweaks */
+    .leaflet-control-attribution{display:none}
+    .leaflet-control-zoom{display:none}
+
+    /* Driver pins */
+    .pin{display:flex;align-items:center;justify-content:center;border-radius:999px;border:2px solid rgba(255,255,255,.9);box-shadow:0 8px 22px rgba(0,0,0,.35)}
+    .pin.me{background:#1bb66a;width:28px;height:28px}
+    .pin.peer{background:#ef4444;width:18px;height:18px;border-color:rgba(255,255,255,.85)}
+
+    /* Car marker (Bolt-like) */
+    .carPin{width:46px;height:46px;position:relative;filter: drop-shadow(0 10px 22px rgba(0,0,0,.45));}
+    .carShadow{position:absolute;left:50%;top:50%;transform:translate(-50%,-10%);width:30px;height:18px;border-radius:999px;background:rgba(0,0,0,.35);filter:blur(6px);}
+    .carBody{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) rotate(0deg);transform-origin:50% 50%;transition:transform .28s ease;}
+    .carSvg{width:42px;height:42px;display:block}
+    .carRing{filter: drop-shadow(0 6px 16px rgba(0,0,0,.35));}
+
+  </style>
+</head>
+<body>
+  <div id="mapWrap">
+    <div id="map"></div>
+    <button class="mapBtn" id="btnMenu" type="button">☰</button>
+    <button class="mapBtn" id="btnShield" type="button">🛡️</button>
+    <button class="mapBtn" id="btnCenter" type="button">🎯</button>
+    <button class="mapBtn" id="btnFilters" type="button">⚙️</button>
+    <button id="onlinePill" class="offline" type="button">Onlayn ol</button>
+  </div>
+
+  <div id="sheet">
+    <div id="sheetHandle"></div>
+    <div id="sheetInner">
+      <div class="muted" id="who" style="margin:2px 2px 6px 2px"></div>
+
+      <div class="card" id="cardAccount">
+        <div class="cardTitle">Hesab <span class="muted" id="onlineStatus" style="font-weight:700">Status: —</span></div>
+        <div class="muted" id="acc">—</div>
+
+    <!-- Compact driver actions (only after login) -->
+        <div class="row hide" id="accActions" style="margin-top:10px">
+          <div class="two">
+            <button id="btnGoOnline" class="primary" type="button">🟢 Online</button>
+            <button id="btnGoOffline" type="button" class="danger">⚪ Offline</button>
+          </div>
+
+          <details id="topupDetails" style="margin-top:6px">
+            <summary><b>Balans artır (manual)</b> <span class="muted">(aç)</span></summary>
+        <div class="row" style="margin-top:8px">
+          <input id="top_amount" type="number" step="0.01" placeholder="Məbləğ (AZN)" />
+          <select id="top_method"><option value="kart-to-kart">kart-to-kart</option><option value="m10">m10</option></select>
+          <input id="top_ref" placeholder="Tranzaksiya ID / qeyd" />
+          <button id="btnTop" type="button">💳 Sorğu göndər</button>
+              <div class="muted" id="topStatus">—</div>
+        </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- HOME STATS (visual) -->
+      <div class="card hide" id="homeStats">
+        <div class="cardTitle">Gündəlik</div>
+        <div class="statGrid">
+          <div class="stat">
+            <div class="label">Bu günün qazancı</div>
+            <div class="value" id="statEarnings">0.00 ₼</div>
+            <div class="sub" id="statEarningsSub">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Balans</div>
+            <div class="value" id="statBalance">—</div>
+            <div class="sub" id="statBalanceSub">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Sürücü xalı</div>
+            <div class="value" id="statScore">—</div>
+            <div class="sub">Keyfiyyət göstəricisi</div>
+          </div>
+          <div class="stat">
+            <div class="label">Qəbul etmə faizi</div>
+            <div class="value" id="statAccept">—</div>
+            <div class="sub">Son 7 gün</div>
+          </div>
+        </div>
+      </div>
+
+  <!-- 1) First time: registration -->
+      <div class="card hide" id="cardReg">
+    <b>Qeydiyyat (min 2010)</b>
+    <div class="row">
+      <input id="phone" placeholder="Telefon" />
+      <div class="two">
+        <input id="make" placeholder="Avto marka" />
+        <input id="model" placeholder="Model" />
+      </div>
+      <div class="two">
+        <input id="year" type="number" placeholder="Buraxılış ili (>=2010)" />
+        <select id="color">
+          <option value="">Rəng seçin</option>
+          <option>ağ</option><option>qara</option><option>qırmızı</option><option>boz</option><option>mavi</option><option>sarı</option><option>yaşıl</option>
+        </select>
+      </div>
+      <input id="plate" placeholder="Nömrə nişanı" />
+
+      <div class="muted">Şəxsiyyət vəsiqəsi (ön/arxa)</div>
+      <div class="two"><input type="file" id="id_front" accept="image/*" /><input type="file" id="id_back" accept="image/*" /></div>
+      <div class="muted">Sürücülük vəsiqəsi (ön/arxa)</div>
+      <div class="two"><input type="file" id="dl_front" accept="image/*" /><input type="file" id="dl_back" accept="image/*" /></div>
+      <div class="muted">Texniki pasport (ön/arxa)</div>
+      <div class="two"><input type="file" id="tp_front" accept="image/*" /><input type="file" id="tp_back" accept="image/*" /></div>
+
+      <div class="muted">Şifrə (login üçün)</div>
+      <div class="two">
+        <input id="regPass" type="password" placeholder="Şifrə" />
+        <input id="regPass2" type="password" placeholder="Şifrə təkrar" />
+      </div>
+
+      <button id="btnReg">✅ Qeydiyyatı göndər</button>
+      <div class="muted" id="regStatus">—</div>
+    </div>
+  </div>
+
+  <!-- 2) After registration: login -->
+      <div class="card hide" id="cardLogin">
+    <b>Login</b>
+    <div class="row">
+      <input id="loginPhone" placeholder="Telefon" />
+      <input id="loginPass" type="password" placeholder="Şifrə" />
+      <button id="btnLogin">🔐 Daxil ol</button>
+      <div class="muted" id="loginStatus">—</div>
+      <div class="muted">Qeyd: Telegram hesabınızla bağlıdır. Telefon və şifrə yalnız bu sürücü hesabı üçün işləyir.</div>
+    </div>
+  </div>
+
+  <!-- Session mini card (visible after login) -->
+      <div class="card hide" id="cardSession">
+    <b>Sessiya</b>
+    <div class="row">
+      <div class="muted" id="sessionStatus">—</div>
+      <button id="btnLogout" class="danger">🚪 Çıxış</button>
+    </div>
+  </div>
+
+  <!-- 3) Driver panels (visible only after login) -->
+      <!-- TABS AREA (after login) -->
+      <div class="hide" id="driverArea">
+        <!-- TAB: Nearby -->
+        <div class="hide" id="tabNearby">
+          <div class="card">
+            <div class="cardTitle">📍 Yaxın sifarişlər</div>
+            <div class="muted">GPS açıq olanda sizə ən yaxın sifarişlər burada çıxacaq.</div>
+            <div class="row" style="margin-top:10px">
+              <select id="radiusSel">
+                <option value="1">Radius: 1 km</option>
+                <option value="3" selected>Radius: 3 km</option>
+                <option value="5">Radius: 5 km</option>
+              </select>
+              <label class="muted" style="display:flex;gap:10px;align-items:center">
+                <input type="checkbox" id="onlyOffersToggle" style="width:auto;transform:scale(1.1)" />
+                Yalnız təklif mənə gəlibsə göstər
+              </label>
+              <button id="btnNearbyManual" type="button">🔍 Manual yaxın sifariş axtar</button>
+            </div>
+            <div class="two" style="margin-top:10px">
+              <button id="btnLocNow" type="button">📍 Yerimi yenilə</button>
+              <button id="btnLocHelp" type="button" class="danger">❓ GPS icazəsi</button>
+            </div>
+            <div class="muted" id="locStatus" style="margin-top:8px">—</div>
+            <div id="nearbyRides" style="margin-top:10px"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Rides -->
+        <div class="hide" id="tabRides">
+          <div class="card">
+            <div class="cardTitle">Gələn sifarişlər</div>
+            <div class="muted">Balans -10 və ya aşağı olanda sifariş ala bilmirsiniz. Komissiya: 10%.</div>
+            <div id="rides" style="margin-top:10px"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Help -->
+        <div class="hide" id="tabHelp">
+          <div class="card">
+            <div class="cardTitle">Yardım</div>
+            <div class="muted">GPS işləmirsə: Telefon Settings → Telegram → Location icazəsini “While using” edin, sonra “Yerimi yenilə”.</div>
+            <div class="row" style="margin-top:10px">
+              <button id="btnHelpCopy" type="button">📋 Dəstək üçün məlumatı kopyala</button>
+              <div class="muted" id="helpInfo">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div id="bottomNav">
+      <button class="navBtn active" data-tab="home" type="button"><div class="navIco">🏠</div><div>Əsas</div></button>
+      <button class="navBtn" data-tab="nearby" type="button"><div class="navIco">📍</div><div>Yaxın</div></button>
+      <button class="navBtn" data-tab="rides" type="button"><div class="navIco">🧾</div><div>Gedişlər</div></button>
+      <button class="navBtn" data-tab="help" type="button"><div class="navIco">❓</div><div>Yardım</div></button>
+    </div>
+  </div>
+
+<script>
+Telegram.WebApp.ready();
+Telegram.WebApp.expand();
+
+const who = document.getElementById('who');
+const accEl = document.getElementById('acc');
+
+const cardReg = document.getElementById('cardReg');
+const cardLogin = document.getElementById('cardLogin');
+const cardSession = document.getElementById('cardSession');
+const driverArea = document.getElementById('driverArea');
+const accActions = document.getElementById('accActions');
+const onlineStatus = document.getElementById('onlineStatus');
+
+const regStatus = document.getElementById('regStatus');
+const loginStatus = document.getElementById('loginStatus');
+const sessionStatus = document.getElementById('sessionStatus');
+const ridesEl = document.getElementById('rides');
+const topStatus = document.getElementById('topStatus');
+const locStatus = document.getElementById('locStatus');
+const nearbyEl = document.getElementById('nearbyRides');
+
+// new UI controls
+const onlinePill = document.getElementById('onlinePill');
+const btnCenter = document.getElementById('btnCenter');
+const btnFilters = document.getElementById('btnFilters');
+const btnMenu = document.getElementById('btnMenu');
+const btnShield = document.getElementById('btnShield');
+const homeStats = document.getElementById('homeStats');
+const statEarnings = document.getElementById('statEarnings');
+const statEarningsSub = document.getElementById('statEarningsSub');
+const statBalance = document.getElementById('statBalance');
+const statBalanceSub = document.getElementById('statBalanceSub');
+const statScore = document.getElementById('statScore');
+const statAccept = document.getElementById('statAccept');
+
+const tabNearby = document.getElementById('tabNearby');
+const tabRides = document.getElementById('tabRides');
+const tabHelp = document.getElementById('tabHelp');
+const btnHelpCopy = document.getElementById('btnHelpCopy');
+const helpInfo = document.getElementById('helpInfo');
+
+const radiusSel = document.getElementById('radiusSel');
+const onlyOffersToggle = document.getElementById('onlyOffersToggle');
+const btnNearbyManual = document.getElementById('btnNearbyManual');
+
+restoreFilters();
+
+const u = tgUser();
+const __isLocalDev = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+who.textContent = u ? `İstifadəçi: ${u.first_name || ''} (@${u.username||'-'})` : (__isLocalDev ? 'Local dev mode' : '');
+if (!who.textContent) who.style.display = 'none';
+
+// ---------------- UI: map + tabs ----------------
+let __map = null;
+let __myMarker = null;
+let __peerLayer = null;
+let __lastGeo = null;
+let __myIcon = null;
+let __peerIcon = null;
+let __prevLL = null;
+let __lastBearing = 0;
+
+function bearingDeg(a, b){
+  const toRad = (x)=>x*Math.PI/180;
+  const toDeg = (x)=>x*180/Math.PI;
+  const lat1 = toRad(a[0]);
+  const lat2 = toRad(b[0]);
+  const dLon = toRad(b[1]-a[1]);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  const brng = (toDeg(Math.atan2(y, x)) + 360) % 360;
+  return brng;
+}
+
+function setCarRotation(deg){
+  if (!__myMarker) return;
+  const el = __myMarker.getElement?.();
+  const body = el?.querySelector?.('.carBody');
+  if (!body) return;
+  body.style.transform = `translate(-50%,-50%) rotate(${deg}deg)`;
+}
+
+function initMap(){
+  try{
+    if (!window.L || __map) return;
+    __map = L.map('map', { zoomControl:false, attributionControl:false });
+
+    // Dark tiles for a more "Bolt-like" look
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(__map);
+
+    // Car icon (rotates based on movement direction)
+    __myIcon = L.divIcon({
+      className: '',
+      iconSize: [46,46],
+      iconAnchor: [23,23],
+      html: `
+        <div class="carPin">
+          <div class="carShadow"></div>
+          <div class="carBody">
+            <svg class="carSvg" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <defs>
+                <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+                  <stop offset="0" stop-color="#FFFFFF" stop-opacity=".92"/>
+                  <stop offset="1" stop-color="#DDE7F3" stop-opacity=".92"/>
+                </linearGradient>
+              </defs>
+              <circle class="carRing" cx="32" cy="32" r="22" fill="rgba(27,182,106,.14)" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
+              <path d="M22 36c0-2 1-4 3-5l4-7c1-2 3-3 5-3h6c2 0 4 1 5 3l4 7c2 1 3 3 3 5v6c0 1-1 2-2 2h-1c-1 0-2-1-2-2v-1H25v1c0 1-1 2-2 2h-1c-1 0-2-1-2-2v-6z" fill="url(#g)"/>
+              <path d="M27 26h10l3 6H24l3-6z" fill="rgba(12,18,28,.85)"/>
+              <circle cx="26" cy="41" r="3" fill="rgba(12,18,28,.9)"/>
+              <circle cx="38" cy="41" r="3" fill="rgba(12,18,28,.9)"/>
+              <path d="M32 18l0 6" stroke="#1bb66a" stroke-width="3" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>`
+    });
+
+    __peerIcon = L.divIcon({ className:'', iconSize:[18,18], iconAnchor:[9,9], html:'<div class="pin peer"></div>' });
+
+    __map.setView([40.4093, 49.8671], 12); // Baku default
+  }catch(_){ /* ignore */ }
+}
+
+function updateMyMarker(geo){
+  __lastGeo = geo || __lastGeo;
+  if (!__map || !__lastGeo) return;
+  const lat = Number(__lastGeo.lat), lon = Number(__lastGeo.lon);
+  if (!isFinite(lat) || !isFinite(lon)) return;
+  const ll = [lat, lon];
+
+  if (!__myMarker) {
+    __myMarker = L.marker(ll, { icon: __myIcon || undefined }).addTo(__map);
+  } else {
+    __myMarker.setLatLng(ll);
+  }
+
+  // rotation based on movement direction
+  if (__prevLL) {
+    const br = bearingDeg(__prevLL, ll);
+    if (isFinite(br)) __lastBearing = br;
+  }
+  __prevLL = ll;
+  setTimeout(()=>setCarRotation(__lastBearing), 0);
+}
+
+function centerOnMe(){
+  if (!__map || !__lastGeo) return;
+  __map.setView([__lastGeo.lat, __lastGeo.lon], 16, { animate:true });
+}
+
+function setActiveTab(name){
+  // home = stats/account/session; others = driverArea tabs
+  const navs = Array.from(document.querySelectorAll('.navBtn'));
+  navs.forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+
+  // show/hide panels
+  show(homeStats, name==='home' && hasToken());
+  show(tabNearby, name==='nearby');
+  show(tabRides, name==='rides');
+  show(tabHelp, name==='help');
+
+  // show tab container only when needed
+  show(driverArea, name !== 'home' && hasToken());
+}
+
+function initTabs(){
+  document.getElementById('bottomNav')?.addEventListener('click', (e)=>{
+    const btn = e.target?.closest?.('.navBtn');
+    if (!btn) return;
+    const t = btn.dataset.tab;
+    if (!hasToken() && t !== 'home'){
+      alert('Əvvəlcə login edin.');
+      return;
+    }
+    setActiveTab(t);
+  });
+}
+
+function setOnlinePill(isOnline){
+  if (!onlinePill) return;
+  onlinePill.classList.toggle('online', !!isOnline);
+  onlinePill.classList.toggle('offline', !isOnline);
+  onlinePill.textContent = isOnline ? 'Onlaynsan' : 'Onlayn ol';
+}
+
+initMap();
+initTabs();
+setActiveTab('home');
+
+if (btnCenter) btnCenter.onclick = ()=>{ centerOnMe(); };
+if (btnFilters) btnFilters.onclick = ()=>{ if (hasToken()) setActiveTab('nearby'); else alert('Əvvəlcə login edin.'); };
+if (btnMenu) btnMenu.onclick = ()=>{ alert('Menyu (tezliklə)'); };
+if (btnShield) btnShield.onclick = ()=>{ alert('Təhlükəsizlik (tezliklə)'); };
+
+if (onlinePill) onlinePill.onclick = async ()=>{
+  // do not auto-open any navigator; only toggle online/offline
+  if (!hasToken()){
+    alert('Əvvəlcə login edin.');
+    return;
+  }
+  const isOnline = onlinePill.classList.contains('online');
+  try{
+    if (!isOnline) {
+      document.getElementById('btnGoOnline')?.click();
+    } else {
+      document.getElementById('btnGoOffline')?.click();
+    }
+  }catch(_){ }
+};
+
+if (btnHelpCopy) btnHelpCopy.onclick = async ()=>{
+  const me = u ? `@${u.username||'-'} (${u.first_name||''})` : 'local';
+  const txt = `PayTaksi Driver\nUser: ${me}\nTime: ${new Date().toISOString()}\nLastGPS: ${__lastGeo ? (__lastGeo.lat+','+__lastGeo.lon) : '—'}\nRadius: ${getRadiusKm()} km\nOnlyOffers: ${getOnlyOffers()?'yes':'no'}`;
+  try{ await navigator.clipboard.writeText(txt); helpInfo.textContent = 'Kopyalandı ✅'; }
+  catch{ helpInfo.textContent = txt; }
+};
+
+function show(el, on=true){ el.classList.toggle('hide', !on); }
+
+function hasToken(){
+  try{ return !!localStorage.getItem('pt_driver_token'); }catch{ return false; }
+}
+function clearToken(){
+  try{ localStorage.removeItem('pt_driver_token'); }catch{}
+}
+
+async function loadMe(){
+  try{
+    const data = await api('/api/driver/me');
+    if (!data.driver){
+      accEl.textContent = 'Qeydiyyat yoxdur. Aşağıdakı formu doldurun.';
+      show(cardReg, true);
+      show(cardLogin, false);
+      show(cardSession, false);
+      show(driverArea, false);
+      show(accActions, false);
+      return null;
+    }
+    // Softer account messaging (no scary "blocked" blast)
+    const st = String(data.driver.status||'—');
+    const bal = Number(data.driver.balance||0);
+    const blockAt = Number(data.blockAt);
+
+    const balanceBlocked = (isFinite(blockAt) && bal <= blockAt);
+    const manualBlocked = (st === 'blocked') && !balanceBlocked;
+    const isBlocked = manualBlocked || balanceBlocked;
+
+    const statusLabel = balanceBlocked
+      ? 'Məhdudiyyət var'
+      : (manualBlocked ? 'Bloklanıb' : (st === 'approved' ? 'Aktiv' : st));
+
+    const statusNote = balanceBlocked
+      ? `Sifariş almaq üçün balansı ${isFinite(blockAt)?blockAt:'—'} AZN-dən yuxarı edin.`
+      : (manualBlocked ? 'Hesabınız admin tərəfindən məhdudlaşdırılıb. Dəstəyə yazın.' : 'Sistemdən istifadə edə bilərsiniz.');
+    accEl.innerHTML = `Status: <b>${statusLabel}</b><br>Balans: <b>${bal.toFixed(2)} AZN</b> <span class="muted">(blok həddi: ${isFinite(blockAt)?blockAt:'—'})</span><br><span class="muted">${statusNote}</span>`;
+
+    // visual stats (some are placeholders until backend exposes analytics)
+    try{
+      if (statBalance) statBalance.textContent = `${Number(data.driver.balance||0).toFixed(2)} ₼`;
+      if (statBalanceSub) statBalanceSub.textContent = `Blok həddi: ${data.blockAt}`;
+      if (statEarnings) statEarnings.textContent = `0.00 ₼`;
+      if (statEarningsSub) statEarningsSub.textContent = `Bu gün: 0 gediş (tezliklə)`;
+      if (statScore) statScore.textContent = `—`;
+      if (statAccept) statAccept.textContent = `—`;
+    }catch(_){ }
+    // registration exists -> require login (UI)
+    show(cardReg, false);
+    // If already logged in, keep login card hidden.
+    show(cardLogin, !hasToken());
+    show(cardSession, hasToken());
+    show(homeStats, hasToken());
+    show(accActions, false);
+    document.getElementById('loginPhone').value = (data.driver.phone||'');
+    return data.driver;
+  }catch(e){
+    accEl.textContent = 'Xəta: '+(e.data?.reason||e.message);
+    return null;
+  }
+}
+
+async function ensureSession(){
+  if (!hasToken()) return false;
+  try{
+    await api('/api/driver/session_me');
+    return true;
+  }catch(e){
+    clearToken();
+    return false;
+  }
+}
+
+function setOnlineUI(isOnline){
+  onlineStatus.textContent = `Status: ${isOnline ? 'online' : 'offline'}`;
+  setOnlinePill(isOnline);
+}
+
+async function getGeo(){
+  return await new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 }
+    );
+  });
+}
+
+function fmtKm(x){
+  const n = Number(x);
+  if (!isFinite(n)) return '—';
+  if (n < 1) return `${Math.round(n*1000)} m`;
+  return `${n.toFixed(2)} km`;
+}
+
+function getRadiusKm(){
+  const v = Number(radiusSel?.value || localStorage.getItem('pt_radius_km') || 3);
+  return isFinite(v) ? v : 3;
+}
+function getOnlyOffers(){
+  return !!onlyOffersToggle?.checked;
+}
+function persistFilters(){
+  try{ localStorage.setItem('pt_radius_km', String(radiusSel.value)); }catch(_){}
+  try{ localStorage.setItem('pt_only_offers', onlyOffersToggle.checked ? '1' : '0'); }catch(_){}
+}
+function restoreFilters(){
+  try{
+    const r = localStorage.getItem('pt_radius_km');
+    if (r && radiusSel) radiusSel.value = r;
+  }catch(_){}
+  try{
+    const o = localStorage.getItem('pt_only_offers');
+    if (onlyOffersToggle) onlyOffersToggle.checked = (o === '1');
+  }catch(_){}
+}
+
+async function sendLocationOnce(){
+  const geo = await getGeo();
+  if (!geo) {
+    setStatus(locStatus, 'GPS alınmadı. Telefonun Location/GPS icazəsini yoxlayın.', false);
+    return null;
+  }
+  try{
+    await api('/api/driver/location', { method:'POST', body: geo });
+    setStatus(locStatus, `Yer yeniləndi ✅ (dəqiqlik: ${Math.round(geo.accuracy||0)}m)`);
+    updateMyMarker(geo);
+    loadNearbyDrivers();
+    return geo;
+  }catch(e){
+    setStatus(locStatus, 'Yer göndərilə bilmədi: '+(e.data?.error||e.data?.reason||e.message), false);
+    return null;
+  }
+}
+
+async function loadNearby(opts={}){
+  try{
+    const qs = new URLSearchParams();
+    qs.set('radius_km', String(getRadiusKm()));
+    qs.set('only_offers', getOnlyOffers() ? '1' : '0');
+    if (opts.force) qs.set('force','1');
+    const data = await api('/api/driver/nearby_rides?'+qs.toString());
+    nearbyEl.innerHTML='';
+    if (data.offline){
+      nearbyEl.innerHTML = '<div class="muted">Siz offline-siniz. Manual axtar üçün “Manual yaxın sifariş axtar” basın (son yer məlumatı ilə). Daha stabil üçün Online edin və GPS göndərin.</div>';
+      return;
+    }
+    if (data.note === 'no_location'){
+      nearbyEl.innerHTML = '<div class="muted">Yerinizi göndərin: “Yerimi yenilə”.</div>';
+      return;
+    }
+
+    (data.rides||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = `<b>#${r.id}</b> • ${fmtKm(r.km_to_pickup)} yaxınlıqda<br>
+        ${r.pickup_text||''} → ${r.drop_text||''}<br>
+        Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+        <button data-id="${r.id}">✅ Qəbul et</button>`;
+      div.querySelector('button').onclick = async ()=>{
+        try{
+          await api('/api/driver/accept', { method:'POST', body:{ ride_id: r.id } });
+          alert('Qəbul edildi ✅');
+          await loadOpenRides();
+          await loadNearby();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      nearbyEl.appendChild(div);
+    });
+    if (!(data.rides||[]).length) nearbyEl.innerHTML = '<div class="muted">Yaxın sifariş tapılmadı.</div>';
+  }catch(e){
+    // ignore
+  }
+}
+
+
+async function loadNearbyDrivers(){
+  try{
+    if (!__map || !__peerLayer || !__lastGeo) return;
+    const qs = new URLSearchParams();
+    qs.set('radius_km', String(getRadiusKm()));
+    const data = await api('/api/driver/nearby_drivers?'+qs.toString());
+    __peerLayer.clearLayers();
+    (data.drivers||[]).forEach((d)=>{
+      const lat = Number(d.lat), lon = Number(d.lon);
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      L.marker([lat, lon], { icon: __peerIcon || undefined, interactive:false }).addTo(__peerLayer);
+    });
+  }catch(_){ /* ignore */ }
+}
+
+
+function startLocationLoop(){
+  if (window.__locTimer) return;
+  window.__locTimer = setInterval(async ()=>{
+    try{
+      await sendLocationOnce();
+      await loadNearby();
+      await loadNearbyDrivers();
+    }catch(_){ }
+  }, 10000);
+}
+
+function stopLocationLoop(){
+  if (window.__locTimer){
+    clearInterval(window.__locTimer);
+    window.__locTimer = null;
+  }
+}
+
+async function refreshAfterLogin(){
+  show(cardLogin, false);
+  show(cardSession, true);
+  show(driverArea, true);
+  show(accActions, true);
+  show(homeStats, true);
+  setActiveTab('home');
+  try{
+    const me = await api('/api/driver/session_me');
+    setOnlineUI(!!me.driver?.is_online);
+  }catch(_){
+    setOnlineUI(false);
+  }
+  // attempt location + nearby list if online
+  try{
+    const me2 = await api('/api/driver/session_me');
+    if (me2.driver?.is_online){
+      await sendLocationOnce();
+      await loadNearby();
+      await loadNearbyDrivers();
+      startLocationLoop();
+    } else {
+      stopLocationLoop();
+    }
+  }catch(_){ }
+  await loadOpenRides();
+  // auto refresh offers/open rides
+  if (!window.__ridesTimer){
+    window.__ridesTimer = setInterval(()=>{ try{ loadOpenRides(); }catch(_){} }, 5000);
+  }
+}
+
+document.getElementById('btnGoOnline').onclick = async ()=>{
+  try{
+    const geo = await getGeo();
+    await api('/api/driver/set_online', { method:'POST', body:{ online:true, ...(geo||{}) }});
+    setOnlineUI(true);
+    await sendLocationOnce();
+    await loadNearby();
+    startLocationLoop();
+    await loadOpenRides();
+  }catch(e){
+    setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+  }
+};
+
+document.getElementById('btnGoOffline').onclick = async ()=>{
+  try{
+    await api('/api/driver/set_online', { method:'POST', body:{ online:false }});
+    setOnlineUI(false);
+    stopLocationLoop();
+  }catch(e){
+    setStatus(sessionStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+  }
+};
+
+document.getElementById('btnLocNow').onclick = async ()=>{
+  await sendLocationOnce();
+  await loadNearby();
+};
+
+document.getElementById('btnLocHelp').onclick = async ()=>{
+  alert('GPS icazəsi üçün: Telefon Settings → Telegram → Location icazəsini "While using" edin. Sonra WebApp-də “Yerimi yenilə” basın.');
+};
+
+// filters
+if (radiusSel) radiusSel.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
+if (onlyOffersToggle) onlyOffersToggle.onchange = async ()=>{ persistFilters(); await loadNearby({force:true}); };
+if (btnNearbyManual) btnNearbyManual.onclick = async ()=>{ await loadNearby({force:true}); await loadNearbyDrivers(); };
+
+document.getElementById('btnReg').onclick = async ()=>{
+  try{
+    setStatus(regStatus,'Yüklənir…');
+    const pass = document.getElementById('regPass').value;
+    const pass2 = document.getElementById('regPass2').value;
+    if (pass || pass2){
+      if (pass.length < 4) throw { data:{error:'pass_too_short'} };
+      if (pass !== pass2) throw { data:{error:'pass_not_match'} };
+    }
+
+    const fd = new FormData();
+    fd.append('phone', document.getElementById('phone').value.trim());
+    fd.append('car_make', document.getElementById('make').value.trim());
+    fd.append('car_model', document.getElementById('model').value.trim());
+    fd.append('car_year', document.getElementById('year').value.trim());
+    fd.append('car_color', document.getElementById('color').value);
+    fd.append('plate', document.getElementById('plate').value.trim());
+    ['id_front','id_back','dl_front','dl_back','tp_front','tp_back'].forEach((k)=>{
+      const f = document.getElementById(k).files[0];
+      if (f) fd.append(k, f);
+    });
+
+    const headers = {};
+    if (tgInitData()) headers['X-Tg-InitData'] = tgInitData();
+    if (!tgInitData() && ptToken()) headers['X-Pt-Token'] = ptToken();
+
+    const res = await fetch('/api/driver/register', { method:'POST', headers, body: fd });
+	let data = null;
+	try{ data = await res.json(); }catch(_){ data = { ok:false, error:`http_${res.status}` }; }
+	if (!res.ok) throw { data };
+
+	// set password if provided (non-fatal)
+	let passSaved = true;
+	if (pass){
+	  try{
+	    await api('/api/driver/set_password', { method:'POST', body:{ password: pass }});
+	  }catch(e){
+	    passSaved = false;
+	  }
+	}
+
+	setStatus(regStatus, passSaved
+	  ? 'Göndərildi ✅. İndi Login edin. (Admin təsdiqi gözlənilir.)'
+	  : 'Göndərildi ✅. Amma şifrə saxlanmadı (DB patch lazım ola bilər). Yenə də Login ekranına keçin.'
+	);
+    await loadMe();
+  }catch(e){
+    const code = e.data?.error || e.data?.reason || 'http';
+    setStatus(regStatus,'Xəta: '+code, false);
+  }
+};
+
+document.getElementById('btnLogin').onclick = async ()=>{
+  try{
+    setStatus(loginStatus,'Daxil olunur…');
+    const phone = document.getElementById('loginPhone').value.trim();
+    const password = document.getElementById('loginPass').value;
+    const data = await api('/api/driver/login', { method:'POST', body:{ phone, password }});
+    try{ localStorage.setItem('pt_driver_token', data.token); }catch{}
+    setStatus(loginStatus,'Daxil oldunuz ✅');
+    setStatus(sessionStatus,'Daxil oldunuz ✅');
+    await refreshAfterLogin();
+  }catch(e){
+    setStatus(loginStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+    show(cardSession, false);
+    show(driverArea, false);
+    show(accActions, false);
+  }
+};
+
+document.getElementById('btnLogout').onclick = async ()=>{
+  try{
+    await api('/api/driver/logout', { method:'POST' });
+  }catch{}
+  clearToken();
+  show(driverArea,false);
+  show(cardSession, false);
+  show(cardLogin, true);
+  show(accActions, false);
+  setStatus(loginStatus,'Çıxış edildi.');
+};
+
+document.getElementById('btnTop').onclick = async ()=>{
+  try{
+    setStatus(topStatus,'Göndərilir…');
+    const amount = Number(document.getElementById('top_amount').value);
+    const method = document.getElementById('top_method').value;
+    const reference = document.getElementById('top_ref').value.trim();
+    await api('/api/driver/topup_request', { method:'POST', body:{ amount, method, reference }});
+    setStatus(topStatus,'Sorğu göndərildi ✅ (admin təsdiqi gözlənilir).');
+  }catch(e){
+    setStatus(topStatus,'Xəta: '+(e.data?.error||e.data?.reason||e.message), false);
+  }
+};
+
+async function loadOpenRides(){
+  try{
+    const data = await api('/api/driver/open_rides');
+    ridesEl.innerHTML='';
+    if (data.offline){
+      ridesEl.innerHTML = '<div class="muted">Siz offline-siniz. Sifarişləri görmək üçün online edin.</div>';
+      return;
+    }
+    if (data.note) ridesEl.innerHTML = `<div class="muted">Qeyd: ${data.note}</div>`;
+
+    // 1) Offers (must accept/reject within timeout)
+    (data.offers||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      const exp = r.offer_expires_at ? new Date(r.offer_expires_at).getTime() : 0;
+      const left = exp ? Math.max(0, Math.ceil((exp - Date.now())/1000)) : 0;
+      div.innerHTML = `<b>#${r.id}</b> • teklif<br>
+      ${r.pickup_text||''} → ${r.drop_text||''}<br>
+      Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+      <div class="muted">⏳ Qalan: <b>${left}s</b></div>
+      <div class="two" style="margin-top:6px">
+        <button data-acc="${r.id}">✅ Qəbul et</button>
+        <button data-rej="${r.id}" class="danger">❌ Rədd et</button>
+      </div>`;
+      div.querySelector('[data-acc]').onclick = async ()=>{
+        try{
+          await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
+          alert('Qəbul edildi ✅');
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      div.querySelector('[data-rej]').onclick = async ()=>{
+        if (!confirm('Bu sifarişi rədd edirsiniz?')) return;
+        try{
+          await api('/api/driver/reject',{method:'POST',body:{ride_id:r.id}});
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      ridesEl.appendChild(div);
+    });
+
+    // 2) Free searching rides (manual accept)
+    (data.rides||[]).forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.innerHTML = `<b>#${r.id}</b> • ${r.status}<br>
+      ${r.pickup_text||''} → ${r.drop_text||''}<br>
+      Məsafə: ${Number(r.distance_km).toFixed(2)} km • Qiymət: ${r.fare} AZN • Komissiya: ${r.commission} AZN<br>
+      <button data-id="${r.id}">✅ Qəbul et</button>`;
+      div.querySelector('button').onclick = async ()=>{
+        try{
+          await api('/api/driver/accept',{method:'POST',body:{ride_id:r.id}});
+          alert('Qəbul edildi ✅');
+          await loadOpenRides();
+        }catch(e){ alert('Xəta: '+(e.data?.error||e.data?.reason||e.message)); }
+      };
+      ridesEl.appendChild(div);
+    });
+
+    if (!(data.offers||[]).length && !(data.rides||[]).length) ridesEl.innerHTML += '<div class="muted">Açıq sifariş yoxdur.</div>';
+  }catch(e){
+    if (e.data?.error === 'need_login') {
+      show(driverArea,false);
+    }
+  }
+}
+
+(async ()=>{
+  await loadMe();
+  const ok = await ensureSession();
+  if (ok){
+    setStatus(sessionStatus,'Sessiya aktiv ✅');
+    await refreshAfterLogin();
+  } else {
+    show(driverArea,false);
+    show(cardSession,false);
+    show(accActions,false);
+    // If driver exists but no session, show login
+    show(cardLogin,true);
+  }
+})();
+</script>
+</body>
+</html>

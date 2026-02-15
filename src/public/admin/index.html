@@ -1,0 +1,411 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayTaksi - Admin</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:14px}
+    .card{border:1px solid #e6e6e6;border-radius:14px;padding:12px;margin:10px 0}
+    input,button,select{width:100%;padding:10px;border-radius:12px;border:1px solid #d9d9d9;font-size:16px}
+    button{border:none;background:#111;color:#fff}
+    .muted{color:#666;font-size:13px}
+    .item{padding:8px;border:1px dashed #ddd;border-radius:12px;margin:6px 0}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+    a{color:inherit}
+    img{max-width:100%;border-radius:12px;border:1px solid #eee}
+  </style>
+</head>
+<body>
+  <h2>PayTaksi 🛠 Admin</h2>
+  <div class="muted">MVP: Basic Auth (Admin login: Ratik / 0123456789).</div>
+
+  <div class="card">
+    <b>Giriş</b>
+    <div class="two">
+      <input id="user" placeholder="Admin login" value="Ratik" />
+      <input id="pass" placeholder="Admin parol" value="0123456789" />
+    </div>
+    <button id="btnSave">🔐 Saxla</button>
+    <div class="muted" id="loginStatus">—</div>
+  </div>
+
+  <div class="card">
+    <b>Yekun</b>
+    <div id="summary" class="muted">—</div>
+  </div>
+
+  <div class="card">
+    <b>Sürücülər</b>
+    <div id="drivers"></div>
+  </div>
+
+  <div class="card">
+    <b>Balans artırma sorğuları</b>
+    <div id="topups"></div>
+  </div>
+
+  <div class="card">
+    <b>Sifarişlər</b>
+    <div id="rides"></div>
+  </div>
+
+  <div class="card">
+    <b>Ləğv səbəbləri statistikası</b>
+    <div class="two" style="margin-top:8px">
+      <select id="cancelDays">
+        <option value="7">Son 7 gün</option>
+        <option value="30" selected>Son 30 gün</option>
+        <option value="90">Son 90 gün</option>
+        <option value="all">Bütün vaxt</option>
+      </select>
+      <button id="btnCancelRefresh">🔄 Yenilə</button>
+    </div>
+    <div class="muted" id="cancelMeta" style="margin-top:8px">—</div>
+    <div id="cancelStats" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <b>Sifariş chat arxivi</b>
+    <div class="three" style="margin-top:8px">
+      <select id="chatDays">
+        <option value="7">Son 7 gün</option>
+        <option value="30" selected>Son 30 gün</option>
+        <option value="90">Son 90 gün</option>
+        <option value="all">Bütün vaxt</option>
+      </select>
+      <input id="chatRideId" placeholder="Ride ID (məs: 123)" />
+      <button id="btnChatRefresh">🔄 Yenilə</button>
+    </div>
+    <div class="muted" id="chatMeta" style="margin-top:8px">—</div>
+    <div id="chatList" style="margin-top:8px"></div>
+    <div id="chatViewer" class="card" style="margin-top:10px;display:none"></div>
+  </div>
+
+<script>
+Telegram.WebApp.ready();
+Telegram.WebApp.expand();
+
+function authHeader(){
+  const u = localStorage.getItem('adm_u') || '';
+  const p = localStorage.getItem('adm_p') || '';
+  if (!u || !p) return null;
+  return 'Basic ' + btoa(u + ':' + p);
+}
+
+async function adminApi(path, {method='GET', body=null}={}){
+  const ah = authHeader();
+  if (!ah) throw new Error('no_auth');
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type':'application/json', 'Authorization': ah },
+    body: body ? JSON.stringify(body) : null
+  });
+  const data = await res.json().catch(()=>({ok:false,error:'bad_json'}));
+  if (!res.ok) throw Object.assign(new Error(data.error||'http_error'), { status: res.status, data });
+  return data;
+}
+
+const loginStatus = document.getElementById('loginStatus');
+document.getElementById('btnSave').onclick = ()=>{
+  localStorage.setItem('adm_u', document.getElementById('user').value.trim());
+  localStorage.setItem('adm_p', document.getElementById('pass').value);
+  loginStatus.textContent = 'Saxlandı ✅';
+  refresh();
+};
+
+async function refresh(){
+  try{
+    const s = await adminApi('/api/admin/summary');
+    document.getElementById('summary').innerHTML =
+      `Pending sürücü: <b>${s.drivers_pending}</b> • Pending topup: <b>${s.topups_pending}</b> • Aktiv sifariş: <b>${s.rides_open}</b>`;
+  }catch(e){}
+
+  try{
+    const d = await adminApi('/api/admin/drivers');
+    const box = document.getElementById('drivers');
+    box.innerHTML='';
+    (d.drivers||[]).forEach((x)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      const docs = (x.documents||[]).map(dd=>`<a href="${dd.file_path}" target="_blank">${dd.doc_type}</a>`).join(' • ');
+      div.innerHTML = `
+        <b>#${x.id}</b> • ${x.status} • Balans: ${x.balance} AZN<br>
+        TG: ${x.first_name||''} (@${x.username||'-'}) • tg_id: ${x.tg_id}<br>
+        Avto: ${x.car_make||''} ${x.car_model||''} • ${x.car_year} • ${x.car_color} • ${x.plate||''}<br>
+        <span class="muted">Sənədlər: ${docs || '-'}</span>
+        <div class="two" style="margin-top:8px">
+          <input class="balAmount" placeholder="Balans məbləği (məs: 5)" inputmode="decimal" />
+          <button class="btnBal">💰 Balans ver</button>
+        </div>
+        <div class="three" style="margin-top:8px">
+          <button data-s="approved">Təsdiqlə</button>
+          <button data-s="rejected">Rədd et</button>
+          <button data-s="blocked">Blokla</button>
+        </div>
+        <div style="margin-top:8px">
+          <button class="btnDelete" style="background:#b00020">🗑 Tam sil</button>
+        </div>
+      `;
+
+      const btnBal = div.querySelector('.btnBal');
+      const balAmount = div.querySelector('.balAmount');
+      if (btnBal && balAmount) {
+        btnBal.onclick = async ()=>{
+          const val = String(balAmount.value||'').trim().replace(',', '.');
+          const amt = Number(val);
+          if (!Number.isFinite(amt) || amt === 0) {
+            alert('Məbləğ düzgün deyil. Məsələn: 5');
+            return;
+          }
+          const ok = confirm(`#${x.id} sürücüyə ${amt} AZN balans əlavə edilsin?`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_balance',{method:'POST', body:{driver_id:x.id, amount: amt}});
+            balAmount.value='';
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Balans verilmədi: ' + msg);
+          }
+        };
+      }
+      div.querySelectorAll('button[data-s]').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const status = btn.getAttribute('data-s');
+          await adminApi('/api/admin/driver_status',{method:'POST', body:{driver_id:x.id, status}});
+          refresh();
+        };
+      });
+      const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
+      box.appendChild(div);
+    });
+    if (!(d.drivers||[]).length) box.innerHTML='<div class="muted">Sürücü yoxdur.</div>';
+  }catch(e){}
+
+  try{
+    const t = await adminApi('/api/admin/topups');
+    const box = document.getElementById('topups');
+    box.innerHTML='';
+    (t.topups||[]).forEach((x)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.innerHTML = `
+        <b>#${x.id}</b> • ${x.status}<br>
+        Sürücü: ${x.first_name||''} (@${x.username||'-'}) • tg_id: ${x.tg_id}<br>
+        Məbləğ: <b>${x.amount} AZN</b> • Metod: ${x.method}<br>
+        Ref: <span class="muted">${x.reference||'-'}</span>
+        <div class="two" style="margin-top:8px">
+          <button data-a="approve">Approve</button>
+          <button data-a="reject">Reject</button>
+        </div>
+      `;
+      div.querySelectorAll('button[data-a]').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const action = btn.getAttribute('data-a');
+          await adminApi('/api/admin/topup_review',{method:'POST', body:{ topup_id:x.id, action }});
+          refresh();
+        };
+      });
+      box.appendChild(div);
+    });
+    if (!(t.topups||[]).length) box.innerHTML='<div class="muted">Sorğu yoxdur.</div>';
+  }catch(e){}
+
+  try{
+    const r = await adminApi('/api/admin/rides');
+    const box = document.getElementById('rides');
+    box.innerHTML='';
+    (r.rides||[]).forEach((x)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      div.innerHTML = `
+        <b>#${x.id}</b> • ${x.status}<br>
+        Sərnişin: ${x.passenger_name||''} (tg:${x.passenger_tg_id})<br>
+        Sürücü: ${x.driver_name||'-'} (tg:${x.driver_tg_id||'-'})<br>
+        ${x.pickup_text||''} → ${x.drop_text||''}<br>
+        ${Number(x.distance_km).toFixed(2)} km • ${x.fare} AZN • Komissiya: ${x.commission} AZN
+      `;
+      const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
+      box.appendChild(div);
+    });
+  }catch(e){}
+
+  try{
+    const days = document.getElementById('cancelDays').value;
+    const cs = await adminApi('/api/admin/cancel_stats?days=' + encodeURIComponent(days));
+    document.getElementById('cancelMeta').textContent = `Mənbə: ${cs.source} • Aralıq: ${cs.days}`;
+    const box = document.getElementById('cancelStats');
+    box.innerHTML='';
+    const items = cs.items || [];
+    if (!items.length){
+      box.innerHTML = '<div class="muted">Hələ məlumat yoxdur.</div>';
+    } else {
+      items.forEach((it, idx)=>{
+        const div = document.createElement('div');
+        div.className='item';
+        div.innerHTML = `<b>${idx+1}.</b> ${it.reason} <span class="muted">• ${it.c}</span>`;
+        const delBtn = div.querySelector('.btnDelete');
+      if (delBtn) {
+        delBtn.onclick = async ()=>{
+          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Silinmədi: ' + msg);
+          }
+        };
+      }
+
+      box.appendChild(div);
+      });
+    }
+  }catch(e){}
+
+  await refreshChatArchive();
+}
+
+(function init(){
+  const u = localStorage.getItem('adm_u'); const p = localStorage.getItem('adm_p');
+  if (u) document.getElementById('user').value=u;
+  if (p) document.getElementById('pass').value=p;
+  refresh();
+  setInterval(refresh, 6000);
+})();
+
+document.getElementById('btnCancelRefresh').onclick = ()=> refresh();
+
+let selectedRideId = null;
+
+async function refreshChatArchive(){
+  try{
+    // If admin typed ride_id, show that first.
+    const rideIdInput = String(document.getElementById('chatRideId').value||'').trim();
+    if (rideIdInput){
+      const rideId = Number(rideIdInput);
+      if (rideId) {
+        selectedRideId = rideId;
+        await openRideChat(rideId);
+        return;
+      }
+    }
+
+    const days = document.getElementById('chatDays').value;
+    const data = await adminApi('/api/admin/ride_chats?days=' + encodeURIComponent(days));
+    document.getElementById('chatMeta').textContent = `Aralıq: ${data.days} • Limit: 200`;
+    const list = document.getElementById('chatList');
+    list.innerHTML = '';
+
+    const rides = data.rides || [];
+    if (!rides.length){
+      list.innerHTML = '<div class="muted">Bu aralıqda chat yoxdur.</div>';
+      document.getElementById('chatViewer').style.display='none';
+      return;
+    }
+
+    rides.forEach((r)=>{
+      const div = document.createElement('div');
+      div.className='item';
+      const last = r.last_msg_at ? new Date(r.last_msg_at).toLocaleString() : '-';
+      div.innerHTML = `
+        <b>#${r.id}</b> • ${r.status} • Mesaj: <b>${r.msg_count}</b><br>
+        ${r.pickup_text||''} → ${r.drop_text||''}<br>
+        Sərnişin: ${r.passenger_name||''} (@${r.passenger_username||'-'}) • Sürücü: ${r.driver_name||'-'} (@${r.driver_username||'-'})<br>
+        <span class="muted">Son mesaj: ${last}</span>
+      `;
+      div.onclick = ()=>{ selectedRideId = Number(r.id); openRideChat(Number(r.id)); };
+      list.appendChild(div);
+    });
+
+    // Keep viewer updated if already selected
+    if (selectedRideId){
+      const exists = rides.some(x=>Number(x.id)===Number(selectedRideId));
+      if (exists) await openRideChat(selectedRideId, { silent: true });
+    }
+  }catch(e){
+    // ignore
+  }
+}
+
+async function openRideChat(rideId, { silent=false }={}){
+  try{
+    const data = await adminApi('/api/admin/ride_chat?ride_id=' + encodeURIComponent(rideId));
+    const v = document.getElementById('chatViewer');
+    v.style.display='block';
+    const ride = data.ride;
+    const msgs = data.messages || [];
+    const head = `
+      <b>Chat: #${ride.id}</b> • ${ride.status}<br>
+      <span class="muted">${ride.pickup_text||''} → ${ride.drop_text||''}</span><br>
+      <span class="muted">Sərnişin: ${ride.passenger_name||''} (@${ride.passenger_username||'-'}) • Sürücü: ${ride.driver_name||'-'} (@${ride.driver_username||'-'})</span>
+      <div class="muted" style="margin-top:6px">Chat arxivdir (read-only).</div>
+      <div style="height:10px"></div>
+    `;
+    const body = msgs.map(m=>{
+      const mine = m.sender_role === 'driver';
+      const align = mine ? 'right' : 'left';
+      const bg = mine ? '#111' : '#fff';
+      const color = mine ? '#fff' : '#111';
+      const t = new Date(m.created_at).toLocaleString();
+      return `<div style="margin:6px 0;text-align:${align}">
+        <span style="display:inline-block;max-width:88%;padding:8px 10px;border-radius:12px;border:1px solid #e6e6e6;background:${bg};color:${color}">${escapeHtml(m.message)}</span>
+        <div class="muted" style="font-size:11px">${t}</div>
+      </div>`;
+    }).join('') || '<div class="muted">Mesaj yoxdur.</div>';
+
+    v.innerHTML = head + `<div style="max-height:320px;overflow:auto;border:1px dashed #ddd;border-radius:12px;padding:8px">${body}</div>`;
+
+    if (!silent) {
+      document.getElementById('chatRideId').value = String(rideId);
+    }
+  }catch(e){
+    if (!silent) alert('Xəta: ' + (e.data?.error||e.data?.reason||e.message));
+  }
+}
+
+function escapeHtml(s){
+  return String(s||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+document.getElementById('btnChatRefresh').onclick = ()=> refreshChatArchive();
+</script>
+</body>
+</html>
