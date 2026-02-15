@@ -549,6 +549,70 @@ async function driversHaveLocationCols(){
   return _driversLocCols;
 }
 
+// --- Rides schema (self-healing)
+// Some deployments start with an empty database. To avoid runtime failures when
+// passenger creates an order, ensure the canonical rides table exists.
+async function ensureRidesTable(){
+  try {
+    // Canonical schema used by current server routes
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS rides (
+        id BIGSERIAL PRIMARY KEY,
+        passenger_user_id BIGINT NOT NULL,
+        driver_user_id BIGINT,
+
+        pickup_lat DOUBLE PRECISION NOT NULL,
+        pickup_lon DOUBLE PRECISION NOT NULL,
+        pickup_text TEXT,
+
+        drop_lat DOUBLE PRECISION NOT NULL,
+        drop_lon DOUBLE PRECISION NOT NULL,
+        drop_text TEXT,
+
+        distance_km DOUBLE PRECISION,
+        duration_min INTEGER,
+        fare NUMERIC(10,2),
+        fare_final NUMERIC(10,2),
+        commission NUMERIC(10,2),
+        is_free BOOLEAN NOT NULL DEFAULT false,
+
+        status TEXT NOT NULL DEFAULT 'searching',
+        offered_driver_id BIGINT,
+        driver_response_deadline TIMESTAMPTZ,
+
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        assigned_at TIMESTAMPTZ,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ
+      );
+    `);
+
+    // Legacy compatibility columns (best-effort, additive)
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS pickup_lng DOUBLE PRECISION;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_lat DOUBLE PRECISION;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_lng DOUBLE PRECISION;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS pickup_label TEXT;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS dropoff_label TEXT;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_distance_km DOUBLE PRECISION;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_duration_min INTEGER;`).catch(()=>{});
+    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS est_price NUMERIC(10,2);`).catch(()=>{});
+
+    // Daily promo helper table (1 free ride/day) used by /api/passenger/create_ride
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS promo_free_rides (
+        passenger_user_id BIGINT NOT NULL,
+        promo_date DATE NOT NULL,
+        used_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (passenger_user_id, promo_date)
+      );
+    `).catch(()=>{});
+  } catch (e) {
+    console.error('ensureRidesTable failed:', e?.message || e);
+  }
+}
+
 async function ensureDispatchTables(){
   // Additive: driver last known location (used for nearest dispatch if available)
   await pool.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;`).catch(()=>{});
@@ -1019,10 +1083,17 @@ app.get('/api/places', async (req, res) => {
 // ---- Passenger: create ride
 app.post('/api/passenger/create_ride', requireTelegram('passenger'), async (req, res) => {
   try {
+  // Accept both snake_case and camelCase payloads (older frontends used camelCase)
+  const b = req.body || {};
+  const pickup_lat = (typeof b.pickup_lat === 'number') ? b.pickup_lat : b.pickupLat;
+  const pickup_lon = (typeof b.pickup_lon === 'number') ? b.pickup_lon : (typeof b.pickupLng === 'number' ? b.pickupLng : b.pickup_lon);
+  const pickup_text = (typeof b.pickup_text === 'string') ? b.pickup_text : (b.pickupLabel || '');
+  const drop_lat = (typeof b.drop_lat === 'number') ? b.drop_lat : b.dropLat;
+  const drop_lon = (typeof b.drop_lon === 'number') ? b.drop_lon : (typeof b.dropLng === 'number' ? b.dropLng : b.drop_lon);
+  const drop_text = (typeof b.drop_text === 'string') ? b.drop_text : (b.dropLabel || '');
 
-  const { pickup_lat, pickup_lon, pickup_text, drop_lat, drop_lon, drop_text } = req.body || {};
-  if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((v) => typeof v !== 'number')) {
-    return res.status(200).json({ ok: false, error: 'bad_coords' });
+  if ([pickup_lat, pickup_lon, drop_lat, drop_lon].some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
+    return res.status(400).json({ ok: false, error: 'bad_coords' });
   }
 
   const passenger = await upsertUser(req.tgUser, 'passenger');
@@ -1077,12 +1148,10 @@ if (isFreeRide) {
   }catch(e){
     console.error('autoAssignRide failed (non-fatal):', e?.message || e);
   }
-  res.json({ ok: true, ride });
-
+  return res.json({ ok: true, ride });
   } catch (e) {
-    console.error('❌ create_ride failed:', e);
-    // Always return JSON so the WebApp never shows bad_json
-    return res.status(200).json({ ok: false, error: 'server_error' });
+    console.error('create_ride fatal error:', e?.message || e);
+    return res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
@@ -2114,6 +2183,7 @@ app.get('/api/admin/rides', adminAuth, async (req, res) => {
 const PORT = process.env.PORT || 10000;
 
 await ensureSchema();
+await ensureRidesTable();
 // Additive: ensure optional tables/columns for dispatch are present.
 await ensureDispatchTables();
 startOfferExpiryLoop();
