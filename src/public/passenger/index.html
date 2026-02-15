@@ -93,6 +93,33 @@
     .sSub{ color:var(--muted); font-size:12.5px; margin-top:3px; }
     .status{ margin:10px 6px 0; font-size:14px; color:var(--muted); }
 
+    /* Bolt-like ride status (animated) */
+    .rideTrack{ margin:10px 6px 0; background:#fff; border:1px solid var(--line); border-radius:16px; padding:12px; box-shadow:0 10px 30px rgba(0,0,0,.06) }
+    .rideTrack.hidden{ display:none }
+    .rtTop{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:10px }
+    .rtTitle{ font-weight:900; font-size:14px; color:#111 }
+    .rtSub{ font-size:12px; color:var(--muted); margin-top:2px }
+    .rtBadge{ font-size:11px; font-weight:900; background:#111; color:#fff; border-radius:999px; padding:6px 10px; white-space:nowrap }
+    .rtSteps{ display:flex; align-items:center; gap:10px }
+    .rtStep{ display:flex; align-items:center; gap:8px; flex:1; min-width:0 }
+    .rtDot{ width:10px; height:10px; border-radius:999px; background:#d1d5db; position:relative; flex:0 0 10px }
+    .rtLbl{ font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+    .rtLine{ height:2px; background:var(--line); flex:1; border-radius:999px; position:relative; overflow:hidden }
+    .rtFill{ position:absolute; left:0; top:0; bottom:0; width:0%; background:#111; border-radius:999px; transition:width .35s ease }
+    .rtStep.done .rtDot{ background:#111 }
+    .rtStep.done .rtLbl{ color:#111; font-weight:900 }
+    .rtStep.current .rtDot{ background:#111 }
+    .rtStep.current .rtLbl{ color:#111; font-weight:900 }
+    .rtStep.current .rtDot::after{ content:''; position:absolute; left:50%; top:50%; width:22px; height:22px; border-radius:999px; transform:translate(-50%,-50%); border:2px solid rgba(0,0,0,.22); animation:rtPulse 1.15s ease-in-out infinite }
+    @keyframes rtPulse{ 0%{ transform:translate(-50%,-50%) scale(.75); opacity:.55 } 60%{ transform:translate(-50%,-50%) scale(1.15); opacity:.15 } 100%{ transform:translate(-50%,-50%) scale(1.25); opacity:0 } }
+
+    .rideTrack[data-state="searching"] .rtFill{ width:35%; animation:rtShimmer 1.1s linear infinite }
+    @keyframes rtShimmer{ 0%{ transform:translateX(-18%) } 100%{ transform:translateX(18%) } }
+    .rideTrack[data-state="assigned"] .rtFill{ width:62% }
+    .rideTrack[data-state="started"] .rtFill{ width:85% }
+    .rideTrack[data-state="completed"] .rtFill{ width:100% }
+    .rideTrack[data-state="cancelled"] .rtFill{ width:0% }
+
     .driverCard{
       margin-top:10px;
       border:1px solid var(--line);
@@ -166,6 +193,37 @@
 
       <div id="status" class="status">GPS oxunur…</div>
 
+      <div id="rideTrack" class="rideTrack hidden" data-state="">
+        <div class="rtTop">
+          <div>
+            <div id="rtTitle" class="rtTitle">Axtarılır…</div>
+            <div id="rtSub" class="rtSub">Yaxın sürücülər yoxlanılır</div>
+          </div>
+          <div id="rtBadge" class="rtBadge">Sifariş</div>
+        </div>
+        <div class="rtSteps" id="rtSteps">
+          <div class="rtStep" data-step="searching">
+            <div class="rtDot"></div>
+            <div class="rtLbl">Axtarılır</div>
+            <div class="rtLine"><div class="rtFill"></div></div>
+          </div>
+          <div class="rtStep" data-step="assigned">
+            <div class="rtDot"></div>
+            <div class="rtLbl">Gəlir</div>
+            <div class="rtLine"><div class="rtFill"></div></div>
+          </div>
+          <div class="rtStep" data-step="started">
+            <div class="rtDot"></div>
+            <div class="rtLbl">Başladı</div>
+            <div class="rtLine"><div class="rtFill"></div></div>
+          </div>
+          <div class="rtStep" data-step="completed">
+            <div class="rtDot"></div>
+            <div class="rtLbl">Bitdi</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Fallback UI (shown automatically if map fails to load in Telegram WebView) -->
       <div id="fallback">
         <div class="hint" style="margin-top:8px">
@@ -206,6 +264,13 @@
     // --- Small utils
     const $ = (id)=>document.getElementById(id);
     const statusEl = $('status');
+
+    // Bolt-like ride status widget
+    const rideTrackEl = $('rideTrack');
+    const rtTitleEl = $('rtTitle');
+    const rtSubEl = $('rtSub');
+    const rtBadgeEl = $('rtBadge');
+    const rtStepsEl = $('rtSteps');
     const destInput = $('destInput');
     const destSuggest = $('destSuggest');
     const btnCreate = $('btnCreate');
@@ -543,16 +608,63 @@
       driverCard.style.display='';
     }
 
+    function setRideTrack(status, rideId){
+      if (!rideTrackEl) return;
+
+      if (!status){
+        rideTrackEl.classList.add('hidden');
+        rideTrackEl.dataset.state = '';
+        if (rtBadgeEl) rtBadgeEl.textContent = 'Sifariş';
+        if (rtStepsEl) rtStepsEl.querySelectorAll('.rtStep').forEach(s=>s.classList.remove('done','current'));
+        return;
+      }
+
+      rideTrackEl.classList.remove('hidden');
+      rideTrackEl.dataset.state = status;
+      if (rtBadgeEl) rtBadgeEl.textContent = rideId ? `#${rideId}` : 'Sifariş';
+
+      const info = {
+        searching: { t:'Axtarılır…', s:'Yaxın sürücülər yoxlanılır' },
+        assigned:  { t:'Sürücü təyin olundu', s:'Sürücü sizə doğru gəlir' },
+        started:   { t:'Gediş başladı', s:'Yolunuz açıq olsun' },
+        completed: { t:'Gediş bitdi', s:'Təşəkkür edirik!' },
+        cancelled: { t:'Sifariş ləğv edildi', s:'Yeni sifariş verə bilərsiniz' }
+      };
+      const m = info[status] || { t:'Sifariş', s:'' };
+      if (rtTitleEl) rtTitleEl.textContent = m.t;
+      if (rtSubEl) rtSubEl.textContent = m.s;
+
+      const order = ['searching','assigned','started','completed'];
+      const idx = order.indexOf(status);
+
+      if (rtStepsEl){
+        rtStepsEl.querySelectorAll('.rtStep').forEach(step=>{
+          const st = step.dataset.step;
+          step.classList.remove('done','current');
+          if (status === 'cancelled') return;
+          const sidx = order.indexOf(st);
+          if (idx > -1){
+            if (sidx < idx) step.classList.add('done');
+            else if (sidx === idx) step.classList.add('current');
+          }
+        });
+      }
+    }
+
     function renderRide(r){
       if (!r){
+        setRideTrack(null);
         renderDriver(null);
         setStatus(pickup ? ('Pick-up: '+pickup.text) : 'GPS oxunur…');
         return;
       }
       const st = String(r.status);
+      setRideTrack(st, r.id);
       if (st === 'searching') setStatus('Yaxın sürücülərə təklif göndərilir…');
       if (st === 'assigned') setStatus('Sürücü təyin edildi. Təsdiq gözlənilir…');
       if (st === 'started') setStatus('Sürücü yoldadır…');
+      if (st === 'completed') setStatus('Gediş bitdi. Təşəkkür edirik!');
+      if (st === 'cancelled') setStatus('Sifariş ləğv edildi.', false);
 
       // map markers
       setMarker('pick', Number(r.pickup_lat), Number(r.pickup_lon));
