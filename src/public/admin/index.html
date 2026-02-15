@@ -136,6 +136,10 @@ async function refresh(){
         TG: ${x.first_name||''} (@${x.username||'-'}) • tg_id: ${x.tg_id}<br>
         Avto: ${x.car_make||''} ${x.car_model||''} • ${x.car_year} • ${x.car_color} • ${x.plate||''}<br>
         <span class="muted">Sənədlər: ${docs || '-'}</span>
+        <div class="two" style="margin-top:8px">
+          <input class="balAmount" placeholder="Balans məbləği (məs: 5)" inputmode="decimal" />
+          <button class="btnBal">💰 Balans ver</button>
+        </div>
         <div class="three" style="margin-top:8px">
           <button data-s="approved">Təsdiqlə</button>
           <button data-s="rejected">Rədd et</button>
@@ -145,6 +149,29 @@ async function refresh(){
           <button class="btnDelete" style="background:#b00020">🗑 Tam sil</button>
         </div>
       `;
+
+      const btnBal = div.querySelector('.btnBal');
+      const balAmount = div.querySelector('.balAmount');
+      if (btnBal && balAmount) {
+        btnBal.onclick = async ()=>{
+          const val = String(balAmount.value||'').trim().replace(',', '.');
+          const amt = Number(val);
+          if (!Number.isFinite(amt) || amt === 0) {
+            alert('Məbləğ düzgün deyil. Məsələn: 5');
+            return;
+          }
+          const ok = confirm(`#${x.id} sürücüyə ${amt} AZN balans əlavə edilsin?`);
+          if (!ok) return;
+          try{
+            await adminApi('/api/admin/driver_balance',{method:'POST', body:{driver_id:x.id, amount: amt}});
+            balAmount.value='';
+            refresh();
+          }catch(e){
+            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
+            alert('Balans verilmədi: ' + msg);
+          }
+        };
+      }
       div.querySelectorAll('button[data-s]').forEach(btn=>{
         btn.onclick = async ()=>{
           const status = btn.getAttribute('data-s');
@@ -189,28 +216,13 @@ async function refresh(){
           <button data-a="reject">Reject</button>
         </div>
       `;
-      div.querySelectorAll('button[data-s]').forEach(btn=>{
+      div.querySelectorAll('button[data-a]').forEach(btn=>{
         btn.onclick = async ()=>{
           const action = btn.getAttribute('data-a');
           await adminApi('/api/admin/topup_review',{method:'POST', body:{ topup_id:x.id, action }});
           refresh();
         };
       });
-      const delBtn = div.querySelector('.btnDelete');
-      if (delBtn) {
-        delBtn.onclick = async ()=>{
-          const ok = confirm(`Sürücü #${x.id} tam silinsin?\n\nBu əməliyyat geri qaytarılmır.`);
-          if (!ok) return;
-          try{
-            await adminApi('/api/admin/driver_delete',{method:'POST', body:{driver_id:x.id}});
-            refresh();
-          }catch(e){
-            const msg = (e && e.data && e.data.error) ? e.data.error : (e.message||'error');
-            alert('Silinmədi: ' + msg);
-          }
-        };
-      }
-
       box.appendChild(div);
     });
     if (!(t.topups||[]).length) box.innerHTML='<div class="muted">Sorğu yoxdur.</div>';

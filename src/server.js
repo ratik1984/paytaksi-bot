@@ -1513,6 +1513,66 @@ app.post('/api/admin/driver_status', adminAuth, async (req, res) => {
   res.json({ ok: true, driver: q.rows[0] || null, note: note || null });
 });
 
+// Admin: manual driver balance adjustment (additive; used from admin UI)
+app.post('/api/admin/driver_balance', adminAuth, async (req, res) => {
+  const { driver_id, amount, note } = req.body || {};
+  const a = Number(amount);
+  if (!Number.isFinite(a) || a === 0) return res.status(400).json({ ok: false, error: 'bad_amount' });
+  // MVP safety limit
+  if (Math.abs(a) > 100000) return res.status(400).json({ ok: false, error: 'amount_too_large' });
+
+  await pool.query('BEGIN');
+  try {
+    const dQ = await pool.query(`SELECT * FROM drivers WHERE id=$1 FOR UPDATE`, [driver_id]);
+    const d = dQ.rows[0];
+    if (!d) throw new Error('driver_not_found');
+
+    const newBal = money2(Number(d.balance) + a);
+    await pool.query(`UPDATE drivers SET balance=$1 WHERE id=$2`, [newBal, d.id]);
+    await pool.query('COMMIT');
+    return res.json({ ok: true, driver_id: d.id, old_balance: Number(d.balance), new_balance: newBal, note: note || null });
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    return res.status(400).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// Admin: hard delete driver + related records (keeps DB consistent)
+app.post('/api/admin/driver_delete', adminAuth, async (req, res) => {
+  const { driver_id } = req.body || {};
+  const id = Number(driver_id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ ok: false, error: 'bad_driver_id' });
+
+  await pool.query('BEGIN');
+  try {
+    const dQ = await pool.query(`SELECT d.id, d.user_id FROM drivers d WHERE d.id=$1 FOR UPDATE`, [id]);
+    const d = dQ.rows[0];
+    if (!d) throw new Error('driver_not_found');
+
+    // Prevent deleting while driver is on an active ride (avoid orphan logic issues)
+    const activeQ = await pool.query(
+      `SELECT COUNT(*)::int c FROM rides WHERE driver_id=$1 AND status IN ('assigned','started')`,
+      [d.id]
+    );
+    if (activeQ.rows[0].c > 0) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'driver_has_active_rides' });
+    }
+
+    // Detach from any remaining rides
+    await pool.query(`UPDATE rides SET driver_id=NULL, updated_at=NOW() WHERE driver_id=$1`, [d.id]);
+
+    // Delete the user row; cascades to drivers, documents, topups, sessions/credentials.
+    await pool.query(`DELETE FROM users WHERE id=$1`, [d.user_id]);
+
+    await pool.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    return res.status(400).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 app.get('/api/admin/topups', adminAuth, async (req, res) => {
   const q = await pool.query(
     `SELECT t.*, d.user_id, u.tg_id, u.first_name, u.username
