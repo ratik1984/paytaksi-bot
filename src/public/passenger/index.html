@@ -230,7 +230,63 @@
     });
 
     // --- Map (can fail if Leaflet CDN blocked). If it fails, we fallback to "no-map" mode.
-    let map, pickMarker, dropMarker, drvMarker, line;
+    let map, pickMarker, dropMarker, drvMarker
+    // Bolt-style live drivers
+    let liveDrivers = new Map();
+    let liveDriversTmr = null;
+
+    function lerp(a,b,t){ return a + (b-a)*t; }
+    function moveMarkerSmooth(marker, toLatLng, durationMs=800){
+      const from = marker.getLatLng();
+      const start = performance.now();
+      function step(now){
+        const t = Math.min(1, (now-start)/durationMs);
+        const lat = lerp(from.lat, toLatLng.lat, t);
+        const lng = lerp(from.lng, toLatLng.lng, t);
+        marker.setLatLng([lat,lng]);
+        if (t < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+
+    function driverIcon(){
+      // simple car-dot icon (no external assets)
+      const html = `<div style="width:14px;height:14px;border-radius:50%;background:#111;box-shadow:0 6px 16px rgba(0,0,0,.25);"></div>`;
+      return L.divIcon({ html, className:'', iconSize:[14,14], iconAnchor:[7,7] });
+    }
+
+    async function pollLiveDrivers(){
+      if (!mapReady || !window.L) return;
+      // Use pickup marker if exists, otherwise map center
+      const ref = pickMarker ? pickMarker.getLatLng() : map.getCenter();
+      try{
+        const res = await api(`/api/passenger/nearby_drivers?lat=${encodeURIComponent(ref.lat)}&lon=${encodeURIComponent(ref.lng)}&radius_km=3`);
+        const drivers = (res && res.drivers) ? res.drivers : [];
+        const seen = new Set();
+        for (const d of drivers){
+          const id = String(d.id);
+          seen.add(id);
+          const latlng = L.latLng(d.lat, d.lon);
+          const existing = liveDrivers.get(id);
+          if (!existing){
+            const mk = L.marker(latlng, { icon: driverIcon(), interactive:false });
+            mk.addTo(map);
+            liveDrivers.set(id, mk);
+          } else {
+            moveMarkerSmooth(existing, latlng, 800);
+          }
+        }
+        // remove stale
+        for (const [id, mk] of Array.from(liveDrivers.entries())){
+          if (!seen.has(id)){
+            try{ map.removeLayer(mk); }catch(_){ }
+            liveDrivers.delete(id);
+          }
+        }
+      }catch(e){
+        // silent; map should keep working even if endpoint fails
+      }
+    }, line;
     let mapReady = false;
     function enableFallbackMode(reason){
       try{ document.getElementById('mapWrap').style.display='none'; }catch(_){ }
@@ -609,6 +665,9 @@
       // Do NOT block UI on GPS: some Telegram WebViews require user gesture.
       pollRides();
       pollTmr = setInterval(pollRides, 2500);
+      // Live drivers on map (Bolt-style)
+      pollLiveDrivers();
+      liveDriversTmr = setInterval(pollLiveDrivers, 3000);
       validate();
       // Try GPS in background (will auto-fallback after a few seconds)
       ensurePickup(false);

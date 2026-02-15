@@ -1,0 +1,18 @@
+PAYTAKSI - BOLT STYLE LIVE DRIVERS (OSM/Leaflet) + WAZE (Additive Patch)
+
+What this patch adds:
+- Passenger endpoint: GET /api/passenger/nearby_drivers?lat=...&lon=...&radius_km=3
+  Returns nearby ONLINE drivers (fresh pings) as icons for the passenger map.
+- Passenger UI: live driver icons on the Leaflet map (updates every 3 seconds, smooth movement).
+- Driver UI: Waze navigation buttons (Pickup / Drop) on each ride card.
+- SQL patch: adds driver location + online columns safely (IF NOT EXISTS).
+
+Install:
+1) Extract this ZIP into your project root (same level as src/, db/, package.json). Overwrite when asked.
+2) Run SQL patch:
+   db/patches/20260215_passenger_nearby_drivers_live.sql
+3) Deploy / restart the service.
+
+Notes:
+- Radius is 3km by default in the passenger endpoint. Passenger UI requests radius_km=3.
+- Fare already matches your tariff in server.js: BASE_FARE=3.50, BASE_KM=3.0, PER_KM_AFTER=0.40.
