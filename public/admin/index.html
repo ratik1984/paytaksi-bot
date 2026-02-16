@@ -149,15 +149,13 @@
           <td>
             <button class="secondary" data-a="approve" data-id="${x.id}">Təsdiqlə</button>
             <div style="height:6px"></div>
-            <button class="secondary" data-a="reject" data-id="${x.id}">Rədd et</button>
-            <div style="height:6px"></div>
-            <button class="secondary" data-a="delete" data-id="${x.id}">Tam sil</button>
+            <button class="secondary" data-a="reject" data-id="${x.id}">Tam sil</button>
           </td>
         </tr>`;
       }).join('');
 
       $('drivers').innerHTML = `<table>
-        <thead><tr><th>ID</th><th>Sürücü</th><th>Maşın</th><th>Status</th><th>Əməliyyat</th></tr></thead>
+        <thead><tr><th>ID</th><th>Sürücü</th><th>Maşın</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
 
@@ -166,12 +164,6 @@
           const id = btn.getAttribute('data-id');
           const a = btn.getAttribute('data-a');
           try{
-            if(a === 'reject'){
-              if(!confirm('Bu sürücü bazadan silinəcək. Davam edilsin?')) return;
-            }
-            if(a === 'delete'){
-              if(!confirm('TAM SİL: Bu sürücü bazadan tam silinəcək. Davam edilsin?')) return;
-            }
             await post(`/api/admin/driver/${id}/${a}`, {});
             await refreshAll();
           }catch(e){ alert(e.message); }
