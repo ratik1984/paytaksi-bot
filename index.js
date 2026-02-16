@@ -369,10 +369,39 @@ app.post('/api/admin/driver/:id/approve', adminAuth, async (req, res) => {
 
 app.post('/api/admin/driver/:id/reject', adminAuth, async (req, res) => {
   const id = Number(req.params.id);
-  await pool.query('UPDATE drivers SET is_approved=false WHERE id=$1', [id]);
-  await pool.query('INSERT INTO admin_audit_logs (admin_user, action, payload) VALUES ($1,$2,$3)', [process.env.ADMIN_WEB_USER, 'REJECT_DRIVER', { driver_id: id }]);
-  io.to(`driver:${id}`).emit('admin_update', { is_approved: false });
-  res.json({ ok: true });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Keep trip history but detach deleted driver (prevents FK issues)
+    await client.query('UPDATE trips SET driver_id=NULL WHERE driver_id=$1', [id]);
+
+    // Remove related driver data
+    await client.query('DELETE FROM driver_documents WHERE driver_id=$1', [id]);
+    await client.query('DELETE FROM cars WHERE driver_id=$1', [id]);
+
+    // Finally delete driver
+    await client.query('DELETE FROM drivers WHERE id=$1', [id]);
+
+    await client.query(
+      'INSERT INTO admin_audit_logs (admin_user, action, payload) VALUES ($1,$2,$3)',
+      [process.env.ADMIN_WEB_USER, 'DELETE_DRIVER', { driver_id: id }]
+    );
+
+    await client.query('COMMIT');
+
+    // Notify (best-effort)
+    io.to(`driver:${id}`).emit('admin_update', { deleted: true });
+
+    res.json({ ok: true, deleted: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error(e);
+    res.status(500).json({ error: 'Silinmə zamanı xəta baş verdi' });
+  } finally {
+    client.release();
+  }
 });
 
 app.get('/api/admin/trips', adminAuth, async (req, res) => {

@@ -147,9 +147,9 @@
           <td>${x.brand||''} ${x.model||''} ${x.year||''}<br><span class="muted">${x.plate_number||''}</span></td>
           <td>${approved}</td>
           <td>
-            <button class="secondary" data-a="approve" data-id="${x.id}">Approve</button>
+            <button class="secondary" data-a="approve" data-id="${x.id}">Təsdiqlə</button>
             <div style="height:6px"></div>
-            <button class="secondary" data-a="reject" data-id="${x.id}">Reject</button>
+            <button class="secondary" data-a="reject" data-id="${x.id}">Tam sil</button>
           </td>
         </tr>`;
       }).join('');
@@ -163,6 +163,10 @@
         btn.onclick = async ()=>{
           const id = btn.getAttribute('data-id');
           const a = btn.getAttribute('data-a');
+          if(a==='reject'){
+            const ok = confirm('Bu sürücünü tam silmək istəyirsiniz? Bu əməliyyat geri qaytarılmır.');
+            if(!ok) return;
+          }
           try{
             await post(`/api/admin/driver/${id}/${a}`, {});
             await refreshAll();
