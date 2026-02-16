@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi - Sürücü paneli</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:0; background:#071a12; color:#e7fff2;}
+    header{padding:14px 16px; background:#0b2a1d; position:sticky; top:0;}
+    h1{font-size:16px; margin:0;}
+    .wrap{padding:14px 16px;}
+    .card{background:#0b2a1d; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:12px; margin-bottom:12px;}
+    input,select,button{width:100%; padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.14); background:#071a12; color:#e7fff2; box-sizing:border-box;}
+    button{background:#18a861; border:none; font-weight:800;}
+    button.secondary{background:#0e3c29; border:1px solid rgba(255,255,255,.14);}
+    .row{display:flex; gap:10px;}
+    .row > *{flex:1;}
+    .muted{color:#a6d8bf; font-size:12px;}
+    #map{height:280px; border-radius:14px; overflow:hidden;}
+    .pill{display:inline-block; padding:6px 10px; border-radius:999px; background:#0e3c29; border:1px solid rgba(255,255,255,.10); font-size:12px;}
+    .ok{color:#70ffb0;}
+    .warn{color:#ffe08a;}
+    .list{display:flex; flex-direction:column; gap:10px;}
+    .offer{padding:10px; border-radius:12px; background:#071a12; border:1px solid rgba(255,255,255,.12);}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🚗 PayTaksi — Sürücü paneli</h1>
+  </header>
+
+  <div class="wrap">
+
+    <div id="auth" class="card">
+      <div class="row" style="margin-bottom:10px;">
+        <button id="btnShowLogin" class="secondary">Giriş</button>
+        <button id="btnShowRegister" class="secondary">Qeydiyyat</button>
+      </div>
+
+      <div id="loginBox">
+        <div class="row">
+          <input id="loginPhone" placeholder="Telefon" />
+          <input id="loginPass" type="password" placeholder="Şifrə" />
+        </div>
+        <div style="height:10px"></div>
+        <button id="btnLogin">Daxil ol</button>
+        <div style="height:10px"></div>
+        <div id="approvalHint" class="muted"></div>
+      </div>
+
+      <div id="registerBox" style="display:none;">
+        <div class="row">
+          <input id="regFirst" placeholder="Ad" />
+          <input id="regLast" placeholder="Soyad" />
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <input id="regPhone" placeholder="Telefon" />
+          <input id="regPass" type="password" placeholder="Şifrə" />
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <input id="carBrand" placeholder="Maşın marka" />
+          <input id="carModel" placeholder="Model" />
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <input id="carYear" placeholder="İl (məs: 2015)" />
+          <input id="carPlate" placeholder="Nömrə" />
+        </div>
+        <div style="height:10px"></div>
+        <button id="btnRegister">Qeydiyyatdan keç</button>
+      </div>
+    </div>
+
+    <div id="app" style="display:none;">
+      <div class="card">
+        <div class="row" style="align-items:center;">
+          <div class="pill">🚗 Driver</div>
+          <button id="btnLogout" class="secondary">Çıxış</button>
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <button id="btnToggleOnline" class="secondary">Online: OFF</button>
+          <button id="btnSendLoc" class="secondary">📡 Lokasiya göndər</button>
+        </div>
+        <div style="height:10px"></div>
+        <div id="map"></div>
+        <div style="height:10px"></div>
+        <div id="driverState" class="muted"></div>
+      </div>
+
+      <div class="card">
+        <div class="pill">📨 Gələn sifarişlər</div>
+        <div style="height:10px"></div>
+        <div id="offers" class="list"></div>
+      </div>
+
+      <div class="card">
+        <div class="pill">🚦 Aktiv trip</div>
+        <div style="height:10px"></div>
+        <div id="activeTrip" class="muted">Yoxdur</div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <button id="btnArrived" class="secondary">ARRIVED</button>
+          <button id="btnStarted" class="secondary">STARTED</button>
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <button id="btnCompleted">COMPLETED</button>
+          <button id="btnCancelled" class="secondary">CANCELLED</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="pill">📄 Sənəd yüklə (demo)</div>
+        <div style="height:10px"></div>
+        <select id="docType">
+          <option value="id_card">Ş/V</option>
+          <option value="driver_license">Sürücülük vəsiqəsi</option>
+          <option value="car_registration">Texpasport</option>
+        </select>
+        <div style="height:10px"></div>
+        <input id="docFile" type="file" accept="image/*" />
+        <div style="height:10px"></div>
+        <button id="btnUploadDoc" class="secondary">Yüklə</button>
+        <div id="docHint" class="muted" style="margin-top:8px;"></div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { tg.expand(); tg.setHeaderColor('#0b2a1d'); tg.setBackgroundColor('#071a12'); }
+
+    const API = (p) => `${location.origin}${p}`;
+    const ls = (k,v)=> v===undefined?localStorage.getItem(k):localStorage.setItem(k,v);
+    let token = ls('pt_driver_token') || '';
+    let isOnline = false;
+    let meId = null;
+    let activeTripId = Number(ls('pt_driver_active_trip')||0);
+
+    const $ = (id)=>document.getElementById(id);
+    function showAuth(){ $('auth').style.display='block'; $('app').style.display='none'; }
+    function showApp(){ $('auth').style.display='none'; $('app').style.display='block'; }
+
+    $('btnShowLogin').onclick = ()=>{ $('loginBox').style.display='block'; $('registerBox').style.display='none'; };
+    $('btnShowRegister').onclick = ()=>{ $('loginBox').style.display='none'; $('registerBox').style.display='block'; };
+
+    async function post(url, body){
+      const r = await fetch(API(url), {method:'POST', headers:{...(body instanceof FormData?{}:{'Content-Type':'application/json'}), ...(token?{'Authorization':'Bearer '+token}:{})}, body: body instanceof FormData ? body : JSON.stringify(body||{})});
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||'Xəta');
+      return j;
+    }
+    async function get(url){
+      const r = await fetch(API(url), {headers:{...(token?{'Authorization':'Bearer '+token}:{})}});
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||'Xəta');
+      return j;
+    }
+
+    $('btnLogin').onclick = async ()=>{
+      try{
+        const j = await post('/api/driver/login', { phone: $('loginPhone').value.trim(), password: $('loginPass').value });
+        token = j.token; ls('pt_driver_token', token);
+        $('approvalHint').textContent = j.is_approved ? '✅ Təsdiqlənmisiniz' : '⏳ Hələ admin təsdiqi yoxdur (yenə də panelə baxa bilərsiniz)';
+        initAfterAuth();
+      }catch(e){ alert(e.message); }
+    };
+
+    $('btnRegister').onclick = async ()=>{
+      try{
+        const tg_id = tg?.initDataUnsafe?.user?.id || null;
+        const j = await post('/api/driver/register', {
+          first_name:$('regFirst').value.trim(),
+          last_name:$('regLast').value.trim(),
+          phone:$('regPhone').value.trim(),
+          password:$('regPass').value,
+          tg_id,
+          car:{ brand:$('carBrand').value.trim(), model:$('carModel').value.trim(), year:$('carYear').value.trim(), plate_number:$('carPlate').value.trim() }
+        });
+        token = j.token; ls('pt_driver_token', token);
+        initAfterAuth();
+        alert('Qeydiyyat tamamlandı. Admin təsdiqi tələb olunur.');
+      }catch(e){ alert(e.message); }
+    };
+
+    $('btnLogout').onclick = ()=>{
+      token=''; ls('pt_driver_token',''); activeTripId=0; ls('pt_driver_active_trip','0');
+      showAuth();
+    };
+
+    // Map
+    let map, myMarker;
+    function initMap(){
+      map = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(map);
+      map.setView([40.4093, 49.8671], 12);
+    }
+
+    async function sendLocation(){
+      return new Promise((resolve)=>{
+        navigator.geolocation.getCurrentPosition(async (pos)=>{
+          const lat = pos.coords.latitude, lng = pos.coords.longitude;
+          if(!myMarker) myMarker = L.marker([lat,lng]).addTo(map);
+          myMarker.setLatLng([lat,lng]).bindPopup('Siz').openPopup();
+          map.setView([lat,lng], 14);
+          try{
+            await post('/api/driver/update_location', {lat, lng});
+            $('driverState').textContent = `Lokasiya yeniləndi: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+          }catch(e){ $('driverState').textContent = e.message; }
+          resolve();
+        }, ()=>{ alert('Geolokasiya icazəsi verin'); resolve(); }, {enableHighAccuracy:true, timeout:8000});
+      });
+    }
+
+    $('btnSendLoc').onclick = sendLocation;
+
+    $('btnToggleOnline').onclick = async ()=>{
+      isOnline = !isOnline;
+      try{
+        await post('/api/driver/set_online', { is_online: isOnline });
+        $('btnToggleOnline').textContent = `Online: ${isOnline?'ON':'OFF'}`;
+      }catch(e){ alert(e.message); }
+    };
+
+    // Docs
+    $('btnUploadDoc').onclick = async ()=>{
+      const f = $('docFile').files[0];
+      if(!f) return alert('Şəkil seçin');
+      const fd = new FormData();
+      fd.append('doc_type', $('docType').value);
+      fd.append('file', f);
+      try{
+        await post('/api/driver/upload_doc', fd);
+        $('docHint').textContent = '✅ Yükləndi (demo). Admin təsdiq edə bilər.';
+      }catch(e){ $('docHint').textContent = '❌ '+e.message; }
+    };
+
+    // Offers
+    function renderOffer(o){
+      const div = document.createElement('div');
+      div.className='offer';
+      div.innerHTML = `<b>Trip #${o.trip_id}</b><br>Yaxın: ${o.near_km} km • Mesafə: ${Number(o.distance_km||0).toFixed(2)} km<br>Qiymət: <b>${o.fare} AZN</b><br><button class="secondary" style="margin-top:8px;">Qəbul et</button>`;
+      div.querySelector('button').onclick = async ()=>{
+        try{
+          await post(`/api/trips/${o.trip_id}/accept`, {});
+          activeTripId = o.trip_id; ls('pt_driver_active_trip', String(activeTripId));
+          await refreshActiveTrip();
+          alert('✅ Trip qəbul edildi');
+        }catch(e){ alert(e.message); }
+      };
+      $('offers').prepend(div);
+    }
+
+    async function refreshActiveTrip(){
+      if(!activeTripId) { $('activeTrip').textContent='Yoxdur'; return; }
+      try{
+        const j = await get(`/api/trips/${activeTripId}`);
+        $('activeTrip').innerHTML = `Trip #${j.trip.id}<br>Status: <b>${j.trip.status}</b><br>Qiymət: ${j.trip.fare} AZN`;
+        if(j.trip.status==='COMPLETED' || j.trip.status==='CANCELLED'){
+          activeTripId=0; ls('pt_driver_active_trip','0');
+        }
+      }catch(e){ $('activeTrip').textContent='Yoxdur'; activeTripId=0; }
+    }
+
+    async function setTripStatus(st){
+      if(!activeTripId) return alert('Aktiv trip yoxdur');
+      try{
+        await post(`/api/trips/${activeTripId}/status`, {status: st});
+        await refreshActiveTrip();
+      }catch(e){ alert(e.message); }
+    }
+
+    $('btnArrived').onclick = ()=>setTripStatus('ARRIVED');
+    $('btnStarted').onclick = ()=>setTripStatus('STARTED');
+    $('btnCompleted').onclick = ()=>setTripStatus('COMPLETED');
+    $('btnCancelled').onclick = ()=>setTripStatus('CANCELLED');
+
+    function initSocket(){
+      const socket = io();
+      socket.emit('join', { role:'driver', id: meId });
+      socket.on('trip_offer', (o)=> renderOffer(o));
+      socket.on('trip_update', (u)=>{ if(u.trip_id===activeTripId) refreshActiveTrip(); });
+      socket.on('admin_update', (u)=>{ $('driverState').textContent = u.is_approved ? '✅ Admin: təsdiqləndiniz' : '⏳ Admin: təsdiq ləğv edildi'; });
+      return socket;
+    }
+
+    async function initAfterAuth(){
+      showApp();
+      if(!map) initMap();
+      const me = await get('/api/me');
+      meId = me.id;
+      initSocket();
+      await sendLocation();
+      await refreshActiveTrip();
+    }
+
+    if(token) initAfterAuth(); else showAuth();
+  </script>
+</body>
+</html>

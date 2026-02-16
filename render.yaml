@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: paytaksi-telegram
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: APP_BASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
+      - key: PASSENGER_BOT_TOKEN
+        sync: false
+      - key: DRIVER_BOT_TOKEN
+        sync: false
+      - key: ADMIN_BOT_TOKEN
+        sync: false
+      - key: ADMIN_WEB_USER
+        sync: false
+      - key: ADMIN_WEB_PASS
+        sync: false

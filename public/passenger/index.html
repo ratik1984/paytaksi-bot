@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi - Sifariş ver</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:0; background:#0b1220; color:#e6e9f2;}
+    header{padding:14px 16px; background:#0f1a33; position:sticky; top:0;}
+    h1{font-size:16px; margin:0;}
+    .wrap{padding:14px 16px;}
+    .card{background:#0f1a33; border:1px solid rgba(255,255,255,.07); border-radius:14px; padding:12px; margin-bottom:12px;}
+    input,select,button{width:100%; padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.12); background:#0b1220; color:#e6e9f2; box-sizing:border-box;}
+    button{background:#2b72ff; border:none; font-weight:700;}
+    button.secondary{background:#18264a; border:1px solid rgba(255,255,255,.12);}
+    .row{display:flex; gap:10px;}
+    .row > *{flex:1;}
+    .muted{color:#9aa6c7; font-size:12px;}
+    #map{height:330px; border-radius:14px; overflow:hidden;}
+    .pill{display:inline-block; padding:6px 10px; border-radius:999px; background:#18264a; border:1px solid rgba(255,255,255,.08); font-size:12px;}
+    .ok{color:#60ffa6;}
+    .warn{color:#ffd36a;}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🚕 PayTaksi — Sifariş ver</h1>
+  </header>
+
+  <div class="wrap">
+
+    <div id="auth" class="card">
+      <div class="row" style="margin-bottom:10px;">
+        <button id="btnShowLogin" class="secondary">Giriş</button>
+        <button id="btnShowRegister" class="secondary">Qeydiyyat</button>
+      </div>
+
+      <div id="loginBox">
+        <div class="row">
+          <input id="loginPhone" placeholder="Telefon (məs: 0501234567)" />
+          <input id="loginPass" type="password" placeholder="Şifrə" />
+        </div>
+        <div style="height:10px"></div>
+        <button id="btnLogin">Daxil ol</button>
+      </div>
+
+      <div id="registerBox" style="display:none;">
+        <div class="row">
+          <input id="regFirst" placeholder="Ad" />
+          <input id="regLast" placeholder="Soyad" />
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <input id="regPhone" placeholder="Telefon" />
+          <input id="regPass" type="password" placeholder="Şifrə" />
+        </div>
+        <div style="height:10px"></div>
+        <button id="btnRegister">Qeydiyyatdan keç</button>
+      </div>
+
+      <div style="height:10px"></div>
+      <div class="muted">Qeyd: Bu demo layihədir. Telegram WebApp içində də işləyir.</div>
+    </div>
+
+    <div id="app" style="display:none;">
+      <div class="card">
+        <div class="row" style="align-items:center;">
+          <div class="pill">👤 Passenger</div>
+          <button id="btnLogout" class="secondary">Çıxış</button>
+        </div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <button id="btnSetPickup" class="secondary">📍 Pick-up seç</button>
+          <button id="btnSetDrop" class="secondary">🏁 Drop seç</button>
+        </div>
+        <div style="height:10px"></div>
+        <div id="map"></div>
+        <div style="height:10px"></div>
+        <div class="row">
+          <select id="payment">
+            <option value="cash">Nağd</option>
+            <option value="card">Kart</option>
+          </select>
+          <button id="btnCreateTrip">Sifariş et</button>
+        </div>
+        <div style="height:10px"></div>
+        <div id="priceBox" class="muted"></div>
+      </div>
+
+      <div class="card">
+        <div class="pill">🚦 Trip status: <span id="tripStatus" class="warn">Yoxdur</span></div>
+        <div style="height:10px"></div>
+        <div id="tripInfo" class="muted"></div>
+        <div style="height:10px"></div>
+        <button id="btnCancel" class="secondary" style="display:none;">Sifarişi ləğv et</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { tg.expand(); tg.setHeaderColor('#0f1a33'); tg.setBackgroundColor('#0b1220'); }
+
+    const API = (p) => `${location.origin}${p}`;
+    const ls = (k,v)=> v===undefined?localStorage.getItem(k):localStorage.setItem(k,v);
+
+    let token = ls('pt_passenger_token') || '';
+    let tripId = Number(ls('pt_trip_id')||0);
+
+    const $ = (id)=>document.getElementById(id);
+
+    function showAuth(){ $('auth').style.display='block'; $('app').style.display='none'; }
+    function showApp(){ $('auth').style.display='none'; $('app').style.display='block'; }
+
+    $('btnShowLogin').onclick = ()=>{ $('loginBox').style.display='block'; $('registerBox').style.display='none'; };
+    $('btnShowRegister').onclick = ()=>{ $('loginBox').style.display='none'; $('registerBox').style.display='block'; };
+
+    async function post(url, body){
+      const r = await fetch(API(url), {method:'POST', headers:{'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{})}, body: JSON.stringify(body||{})});
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||'Xəta');
+      return j;
+    }
+    async function get(url){
+      const r = await fetch(API(url), {headers:{...(token?{'Authorization':'Bearer '+token}:{})}});
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||'Xəta');
+      return j;
+    }
+
+    $('btnLogin').onclick = async ()=>{
+      try{
+        const j = await post('/api/passenger/login', { phone: $('loginPhone').value.trim(), password: $('loginPass').value });
+        token = j.token; ls('pt_passenger_token', token);
+        initAfterAuth();
+      }catch(e){ alert(e.message); }
+    };
+
+    $('btnRegister').onclick = async ()=>{
+      try{
+        const tg_id = tg?.initDataUnsafe?.user?.id || null;
+        const j = await post('/api/passenger/register', { first_name:$('regFirst').value.trim(), last_name:$('regLast').value.trim(), phone:$('regPhone').value.trim(), password:$('regPass').value, tg_id });
+        token = j.token; ls('pt_passenger_token', token);
+        initAfterAuth();
+      }catch(e){ alert(e.message); }
+    };
+
+    $('btnLogout').onclick = ()=>{
+      token=''; ls('pt_passenger_token',''); tripId=0; ls('pt_trip_id','0');
+      showAuth();
+    };
+
+    // Map
+    let map, pickupMarker, dropMarker;
+    let mode = 'pickup';
+    let pickup = null, drop = null;
+
+    function initMap(){
+      map = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
+
+      map.on('click', (e)=>{
+        const p = {lat: e.latlng.lat, lng: e.latlng.lng};
+        if(mode==='pickup') setPickup(p);
+        else setDrop(p);
+      });
+
+      // Center to user's location
+      navigator.geolocation.getCurrentPosition((pos)=>{
+        const c = [pos.coords.latitude, pos.coords.longitude];
+        map.setView(c, 14);
+        setPickup({lat:c[0], lng:c[1]});
+      }, ()=>{
+        map.setView([40.4093, 49.8671], 12); // Baku fallback
+      }, {enableHighAccuracy:true, timeout:8000});
+    }
+
+    function setPickup(p){
+      pickup = p;
+      if(!pickupMarker) pickupMarker = L.marker([p.lat,p.lng]).addTo(map);
+      pickupMarker.setLatLng([p.lat,p.lng]).bindPopup('Pick-up').openPopup();
+      updatePrice();
+    }
+    function setDrop(p){
+      drop = p;
+      if(!dropMarker) dropMarker = L.marker([p.lat,p.lng]).addTo(map);
+      dropMarker.setLatLng([p.lat,p.lng]).bindPopup('Drop').openPopup();
+      updatePrice();
+    }
+
+    $('btnSetPickup').onclick = ()=>{ mode='pickup'; alert('Xəritədə pick-up nöqtəsini seçin'); };
+    $('btnSetDrop').onclick = ()=>{ mode='drop'; alert('Xəritədə drop nöqtəsini seçin'); };
+
+    async function updatePrice(){
+      if(!pickup || !drop) { $('priceBox').textContent='Pick-up və Drop seçin.'; return; }
+      const pricing = await get('/api/pricing');
+      $('priceBox').textContent = `Təxmini qiymət: base ${pricing.baseFare} AZN, daxil ${pricing.includedKm} km, +${pricing.perKm} AZN/km (komissiya ${Math.round(pricing.commissionRate*100)}%)`;
+    }
+
+    $('btnCreateTrip').onclick = async ()=>{
+      try{
+        if(!pickup || !drop) return alert('Pick-up və Drop seçin');
+        const j = await post('/api/trips/create', { pickup, drop, payment_method: $('payment').value });
+        tripId = j.trip.id; ls('pt_trip_id', String(tripId));
+        $('tripStatus').textContent = j.trip.status;
+        $('btnCancel').style.display='block';
+        await refreshTrip();
+        alert(`Sifarişiniz qəbul edildi (#${tripId}). Sürücü axtarılır...`);
+      }catch(e){ alert(e.message); }
+    };
+
+    $('btnCancel').onclick = async ()=>{
+      if(!tripId) return;
+      try{
+        await post(`/api/trips/${tripId}/cancel`, {});
+        $('tripStatus').textContent='CANCELLED';
+        $('btnCancel').style.display='none';
+      }catch(e){ alert(e.message); }
+    };
+
+    async function refreshTrip(){
+      if(!tripId) return;
+      try{
+        const j = await get(`/api/trips/${tripId}`);
+        $('tripStatus').textContent = j.trip.status;
+        const d = j.driver;
+        $('tripInfo').innerHTML = `Trip #${j.trip.id}<br>Mesafə: ${Number(j.trip.distance_km||0).toFixed(2)} km<br>Qiymət: ${j.trip.fare} AZN` + (d?`<br><br><b>Sürücü</b>: ${d.first_name} ${d.last_name} (${d.brand||''} ${d.model||''} • ${d.plate_number||''})`:'');
+        $('btnCancel').style.display = (j.trip.status==='SEARCHING') ? 'block' : 'none';
+      }catch(e){ /* ignore */ }
+    }
+
+    function initSocket(){
+      const socket = io();
+      socket.emit("join", { role: "passenger", id: window.__meId });
+      // We don't know passenger id on client; simplest: no server-side join by id here.
+      // Instead, we use trip polling + Telegram bot messages; but for demo we still listen to trip_update via polling.
+      socket.on('trip_update', (data)=>{
+        if(data.trip_id === tripId){
+          $('tripStatus').textContent = data.status;
+          refreshTrip();
+        }
+      });
+      return socket;
+    }
+
+    async function initAfterAuth(){
+      showApp();
+      const me = await get("/api/me");
+      window.__meId = me.id;
+      if(!map initMap();
+      await updatePrice();
+      if(tripId) await refreshTrip();
+      initSocket();
+    }
+
+    // Start
+    if(token) initAfterAuth(); else showAuth();
+  </script>
+</body>
+</html>
