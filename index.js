@@ -38,20 +38,13 @@ if (!first_name || !last_name || !phone || !password) {
 
     const password_hash = await bcrypt.hash(password, 10);
 
-    await pool.query(
-      INSERT INTO drivers
-      (first_name, last_name, phone, password_hash, car_make, car_model, car_year, plate, status, is_approved, is_online)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',false,false)
-    , [
-      first_name,
-      last_name,
-      phone,
-      password_hash,
-      car_make,
-      car_model,
-      car_year,
-      plate
-    ]);
+await pool.query(
+  `INSERT INTO drivers 
+  (first_name, last_name, phone, password_hash, car_make, car_model, car_year, plate, status, is_approved)
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',false)`,
+  [first_name, last_name, phone, password_hash, car_make, car_model, car_year, plate]
+);
+
 
     res.json({ success: true });
 
