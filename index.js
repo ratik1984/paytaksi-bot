@@ -17,8 +17,8 @@ const app = express();
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Some deployments may differ slightly in DB schema (e.g. car fields stored on
-// `drivers`, or `cars` table missing). These helpers keep the server resilient.
+// Some deployments may differ slightly in DB schema (e.g. different column names for lng/last seen,
+// or car fields stored on `drivers` vs a separate `cars` table). These helpers keep the server resilient.
 const _tableColumnCache = new Map();
 async function getTableColumns(tableName) {
   if (_tableColumnCache.has(tableName)) return _tableColumnCache.get(tableName);
@@ -40,6 +40,23 @@ async function tableExists(tableName) {
   );
   return rowCount > 0;
 }
+
+async function getDriverLocationColumns() {
+  const cols = await getTableColumns('drivers');
+  const lngCol =
+    cols.has('last_lng') ? 'last_lng' :
+    cols.has('last_lon') ? 'last_lon' :
+    cols.has('last_long') ? 'last_long' :
+    'last_lng';
+  const seenCol =
+    cols.has('last_seen') ? 'last_seen' :
+    cols.has('last_loc_at') ? 'last_loc_at' :
+    cols.has('online_updated_at') ? 'online_updated_at' :
+    null;
+  const accCol = cols.has('last_loc_accuracy') ? 'last_loc_accuracy' : null;
+  return { cols, lngCol, seenCol, accCol };
+}
+
 
 
 // HTTP + Socket.IO first (so we can use `io` inside routes)
@@ -99,7 +116,9 @@ app.post('/api/passenger/login', async (req, res) => {
 // Driver auth
 app.post('/api/driver/register', async (req, res) => {
   try {
+    // Frontend sends: { first_name, last_name, phone, password, car: { brand, model, year, plate_number, color? } }
     const { first_name, last_name, phone, password, car } = req.body;
+
     if (!first_name || !last_name || !phone || !password) {
       return res.status(400).json({ error: 'Bütün xanaları doldurun' });
     }
@@ -107,7 +126,7 @@ app.post('/api/driver/register', async (req, res) => {
     const password_hash = await bcrypt.hash(password, 10);
 
     // Adapt to schema differences
-    const driversCols = await getTableColumns('drivers');
+    const driversCols = (await getDriverLocationColumns()).cols;
     const hasCarsTable = await tableExists('cars');
 
     // Build INSERT dynamically based on existing columns
@@ -124,12 +143,13 @@ app.post('/api/driver/register', async (req, res) => {
     if (driversCols.has('last_name')) add('last_name', last_name);
     add('phone', phone);
     add('password_hash', password_hash);
+
     if (driversCols.has('status')) add('status', 'pending');
     if (driversCols.has('is_approved')) add('is_approved', false);
     if (driversCols.has('is_online')) add('is_online', false);
 
+    // Store car fields on drivers if those columns exist
     const carObj = car || {};
-    // If car fields exist directly on drivers, store them there too
     const carMap = [
       ['car_make', carObj.brand],
       ['car_model', carObj.model],
@@ -144,27 +164,38 @@ app.post('/api/driver/register', async (req, res) => {
 
     await pool.query('BEGIN');
 
-    const insertSql = `INSERT INTO drivers (${cols.join(', ')}) VALUES (${vals.join(', ')}) RETURNING id`;
+    const insertSql = `INSERT INTO drivers (${cols.join(', ')}) VALUES (${vals.join(', ')}) RETURNING id, is_approved`;
     const r = await pool.query(insertSql, params);
     const driverId = r.rows[0].id;
 
-    // If a separate cars table exists, store car there
+    // If a separate cars table exists, store car there too (best-effort)
     if (hasCarsTable && car) {
       try {
         await pool.query(
-          `INSERT INTO cars (driver_id, brand, model, year, plate_number)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [driverId, carObj.brand || '', carObj.model || '', carObj.year || null, carObj.plate_number || '']
+          `INSERT INTO cars (driver_id, brand, model, year, plate_number, color)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [
+            driverId,
+            carObj.brand || '',
+            carObj.model || '',
+            carObj.year || null,
+            carObj.plate_number || '',
+            carObj.color || null
+          ]
         );
-      } catch (e) {
-        // Ignore car insert errors (schema mismatch); driver is still created.
+      } catch (_) {
+        // ignore car insert errors
       }
     }
 
     await pool.query('COMMIT');
-    res.json({ ok: true, id: driverId });
+
+    // Frontend expects token like passenger flow
+    const token = signToken({ role: 'driver', id: driverId });
+    res.json({ token, is_approved: false });
   } catch (e) {
     try { await pool.query('ROLLBACK'); } catch (_) {}
+    if ((e.message || '').includes('duplicate')) return res.status(409).json({ error: 'Phone already used' });
     console.error(e);
     res.status(500).json({ error: 'Server error' });
   }
@@ -209,26 +240,56 @@ app.post('/api/driver/upload_doc', authMiddleware('driver'), upload.single('file
 app.post('/api/driver/set_online', authMiddleware('driver'), async (req, res) => {
   try {
     const { is_online } = req.body;
-    await pool.query('UPDATE drivers SET is_online=$1, last_seen=NOW() WHERE id=$2', [!!is_online, req.user.id]);
+    const { seenCol } = await getDriverLocationColumns();
+
+    if (seenCol) {
+      await pool.query(`UPDATE drivers SET is_online=$1, ${seenCol}=NOW() WHERE id=$2`, [!!is_online, req.user.id]);
+    } else {
+      await pool.query('UPDATE drivers SET is_online=$1 WHERE id=$2', [!!is_online, req.user.id]);
+    }
     res.json({ ok: true });
-  } catch {
+  } catch (e) {
+    console.error(e);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 app.post('/api/driver/update_location', authMiddleware('driver'), async (req, res) => {
   try {
-    const { lat, lng } = req.body;
+    const { lat, lng, accuracy } = req.body;
     if (lat == null || lng == null) return res.status(400).json({ error: 'Missing' });
-    await pool.query(
-      'UPDATE drivers SET last_lat=$1, last_lng=$2, last_seen=NOW() WHERE id=$3',
-      [Number(lat), Number(lng), req.user.id]
-    );
+
+    const { lngCol, seenCol, accCol } = await getDriverLocationColumns();
+
+    if (accCol && seenCol) {
+      await pool.query(
+        `UPDATE drivers SET last_lat=$1, ${lngCol}=$2, ${accCol}=$3, ${seenCol}=NOW() WHERE id=$4`,
+        [Number(lat), Number(lng), Number(accuracy || 0), req.user.id]
+      );
+    } else if (accCol && !seenCol) {
+      await pool.query(
+        `UPDATE drivers SET last_lat=$1, ${lngCol}=$2, ${accCol}=$3 WHERE id=$4`,
+        [Number(lat), Number(lng), Number(accuracy || 0), req.user.id]
+      );
+    } else if (!accCol && seenCol) {
+      await pool.query(
+        `UPDATE drivers SET last_lat=$1, ${lngCol}=$2, ${seenCol}=NOW() WHERE id=$3`,
+        [Number(lat), Number(lng), req.user.id]
+      );
+    } else {
+      await pool.query(
+        `UPDATE drivers SET last_lat=$1, ${lngCol}=$2 WHERE id=$3`,
+        [Number(lat), Number(lng), req.user.id]
+      );
+    }
+
     res.json({ ok: true });
-  } catch {
+  } catch (e) {
+    console.error(e);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 // Passenger create trip
 app.post('/api/trips/create', authMiddleware('passenger'), async (req, res) => {
@@ -261,8 +322,9 @@ app.post('/api/trips/create', authMiddleware('passenger'), async (req, res) => {
 
     // Find nearby drivers and emit offers
     const radiusKm = Number(process.env.DRIVER_SEARCH_RADIUS_KM || 2);
+    const { lngCol } = await getDriverLocationColumns();
     const d = await pool.query(
-      'SELECT id, last_lat, last_lng FROM drivers WHERE is_online=true AND is_approved=true AND last_lat IS NOT NULL AND last_lng IS NOT NULL'
+      `SELECT id, last_lat, ${lngCol} AS last_lng FROM drivers WHERE is_online=true AND is_approved=true AND last_lat IS NOT NULL AND ${lngCol} IS NOT NULL`
     );
 
     const candidates = d.rows
@@ -387,14 +449,38 @@ app.get('/api/trips/:id', authMiddleware(), async (req, res) => {
 
     let driver = null;
     if (t.driver_id) {
-      const d = await pool.query(
-        `SELECT d.id, d.first_name, d.last_name, d.rating, c.brand, c.model, c.plate_number
-         FROM drivers d
-         LEFT JOIN cars c ON c.driver_id=d.id
-         WHERE d.id=$1`,
-        [t.driver_id]
-      );
-      driver = d.rows[0] || null;
+      const hasCarsTable = await tableExists('cars');
+      if (hasCarsTable) {
+        try {
+          const d = await pool.query(
+            `SELECT d.id, d.first_name, d.last_name, d.rating, c.brand, c.model, c.plate_number
+             FROM drivers d
+             LEFT JOIN cars c ON c.driver_id=d.id
+             WHERE d.id=$1`,
+            [t.driver_id]
+          );
+          driver = d.rows[0] || null;
+        } catch (e) {
+          // Fallback if cars schema differs
+          const d2 = await pool.query(
+            `SELECT id, first_name, last_name, rating,
+                    car_make AS brand, car_model AS model,
+                    COALESCE(car_number, plate) AS plate_number
+             FROM drivers WHERE id=$1`,
+            [t.driver_id]
+          );
+          driver = d2.rows[0] || null;
+        }
+      } else {
+        const d2 = await pool.query(
+          `SELECT id, first_name, last_name, rating,
+                  car_make AS brand, car_model AS model,
+                  COALESCE(car_number, plate) AS plate_number
+           FROM drivers WHERE id=$1`,
+          [t.driver_id]
+        );
+        driver = d2.rows[0] || null;
+      }
     }
 
     res.json({ trip: t, driver });
@@ -425,15 +511,36 @@ app.get('/api/admin/overview', adminAuth, async (req, res) => {
 });
 
 app.get('/api/admin/drivers', adminAuth, async (req, res) => {
-  const q = await pool.query(
-    `SELECT d.*, c.brand, c.model, c.year, c.plate_number
+  const hasCarsTable = await tableExists('cars');
+
+  if (hasCarsTable) {
+    try {
+      const q = await pool.query(
+        `SELECT d.*, c.brand, c.model, c.year, c.plate_number
+         FROM drivers d
+         LEFT JOIN cars c ON c.driver_id=d.id
+         ORDER BY d.created_at DESC
+         LIMIT 200`
+      );
+      return res.json({ drivers: q.rows });
+    } catch (e) {
+      // fall through to drivers-only
+    }
+  }
+
+  const q2 = await pool.query(
+    `SELECT d.*,
+            d.car_make AS brand,
+            d.car_model AS model,
+            d.car_year AS year,
+            COALESCE(d.car_number, d.plate) AS plate_number
      FROM drivers d
-     LEFT JOIN cars c ON c.driver_id=d.id
      ORDER BY d.created_at DESC
      LIMIT 200`
   );
-  res.json({ drivers: q.rows });
+  res.json({ drivers: q2.rows });
 });
+
 
 app.post('/api/admin/driver/:id/approve', adminAuth, async (req, res) => {
   const id = Number(req.params.id);
@@ -458,8 +565,15 @@ app.post('/api/admin/driver/:id/reject', adminAuth, async (req, res) => {
       await pool.query('DELETE FROM cars WHERE driver_id = $1', [id]);
     } catch (_) {}
 
+    // remove driver docs if table exists
+    try {
+      await pool.query('DELETE FROM driver_documents WHERE driver_id = $1', [id]);
+    } catch (_) {}
+
     // finally delete driver
     await pool.query('DELETE FROM drivers WHERE id = $1', [id]);
+
+    await pool.query('INSERT INTO admin_audit_logs (admin_user, action, payload) VALUES ($1,$2,$3)', [process.env.ADMIN_WEB_USER, 'DELETE_DRIVER', { driver_id: id }]);
 
     await pool.query('COMMIT');
     res.json({ ok: true });
@@ -469,6 +583,7 @@ app.post('/api/admin/driver/:id/reject', adminAuth, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 app.get('/api/admin/trips', adminAuth, async (req, res) => {
   const q = await pool.query(
