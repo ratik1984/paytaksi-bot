@@ -72,11 +72,7 @@ app.post('/api/passenger/login', async (req, res) => {
 });
 
 // Driver auth
-app.post('/api/driver/register', async (req, res) => {
-  try {
-    const { first_name, last_name, phone, password, tg_id, car } = req.body;
-    if (!first_name || !last_name || !phone || !password || !car) return res.status(400).json({ error: 'Missing fields' });
-    const password_hash = await bcrypt.hash(password, 10);
+const password_hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
       'INSERT INTO drivers (first_name,last_name,phone,password_hash,tg_id) VALUES ($1,$2,$3,$4,$5) RETURNING id',
       [first_name, last_name, phone, password_hash, tg_id || null]
@@ -369,39 +365,10 @@ app.post('/api/admin/driver/:id/approve', adminAuth, async (req, res) => {
 
 app.post('/api/admin/driver/:id/reject', adminAuth, async (req, res) => {
   const id = Number(req.params.id);
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Keep trip history but detach deleted driver (prevents FK issues)
-    await client.query('UPDATE trips SET driver_id=NULL WHERE driver_id=$1', [id]);
-
-    // Remove related driver data
-    await client.query('DELETE FROM driver_documents WHERE driver_id=$1', [id]);
-    await client.query('DELETE FROM cars WHERE driver_id=$1', [id]);
-
-    // Finally delete driver
-    await client.query('DELETE FROM drivers WHERE id=$1', [id]);
-
-    await client.query(
-      'INSERT INTO admin_audit_logs (admin_user, action, payload) VALUES ($1,$2,$3)',
-      [process.env.ADMIN_WEB_USER, 'DELETE_DRIVER', { driver_id: id }]
-    );
-
-    await client.query('COMMIT');
-
-    // Notify (best-effort)
-    io.to(`driver:${id}`).emit('admin_update', { deleted: true });
-
-    res.json({ ok: true, deleted: true });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error(e);
-    res.status(500).json({ error: 'Silinmə zamanı xəta baş verdi' });
-  } finally {
-    client.release();
-  }
+  await pool.query('UPDATE drivers SET is_approved=false WHERE id=$1', [id]);
+  await pool.query('INSERT INTO admin_audit_logs (admin_user, action, payload) VALUES ($1,$2,$3)', [process.env.ADMIN_WEB_USER, 'REJECT_DRIVER', { driver_id: id }]);
+  io.to(`driver:${id}`).emit('admin_update', { is_approved: false });
+  res.json({ ok: true });
 });
 
 app.get('/api/admin/trips', adminAuth, async (req, res) => {
@@ -453,4 +420,39 @@ async function main() {
 main().catch((e) => {
   console.error(e);
   process.exit(1);
+});
+
+
+
+app.post('/api/driver/register', async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      phone,
+      car_make,
+      car_model,
+      car_year,
+      plate
+    } = req.body;
+
+    await db.query(`
+      INSERT INTO drivers 
+      (first_name, last_name, phone, car_make, car_model, car_year, plate, status, is_approved, is_online)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',false,false)
+    `, [
+      first_name || '',
+      last_name || '',
+      phone,
+      car_make,
+      car_model,
+      car_year,
+      plate
+    ]);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
