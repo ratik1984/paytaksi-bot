@@ -31,7 +31,7 @@ app.post('/api/driver/register', async (req, res) => {
       plate
     } = req.body;
 
-    if (!first_name  !phone || !password) {
+    if (!first_name  !last_name  !phone || !password) {
       return res.status(400).json({ error: "Məlumatlar natamamdır" });
     }
 
