@@ -989,5 +989,98 @@ async function loadOpenRides(){
   }
 })();
 </script>
+
+<!-- Socket.IO (Realtime) -->
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function(){
+  try {
+    const socket = io();
+    window.__pt_socket = socket;
+
+    function getDriverId(){
+      return (window.__driver_id || window.driverId || (window.__TG_USER__ && window.__TG_USER__.id) || (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user && Telegram.WebApp.initDataUnsafe.user.id) || null);
+    }
+
+    function emitOnline(geo){
+      const driverId = getDriverId();
+      if(!driverId) return;
+      socket.emit("driver-online", {
+        driverId: driverId,
+        lat: geo && geo.lat != null ? geo.lat : null,
+        lng: geo && (geo.lng != null ? geo.lng : (geo.lon != null ? geo.lon : null))
+      });
+    }
+
+    function emitLocation(geo){
+      const driverId = getDriverId();
+      if(!driverId || !geo) return;
+      socket.emit("driver-location", {
+        driverId: driverId,
+        lat: geo.lat,
+        lng: (geo.lng != null ? geo.lng : geo.lon)
+      });
+    }
+
+    // Wrap existing functions (additive only)
+    const _sendLocationOnce = window.sendLocationOnce;
+    if (typeof _sendLocationOnce === "function") {
+      window.sendLocationOnce = async function(...args){
+        const res = await _sendLocationOnce.apply(this, args);
+        // try to read latest geo from window.__last_geo if present
+        const g = window.__last_geo || (args && args[0] && typeof args[0]==="object" ? args[0] : null);
+        if (g && g.lat != null) emitLocation(g);
+        return res;
+      };
+    }
+
+    // Hook into geolocation pipeline used by the page
+    const _geoSuccess = window.__onGeoSuccess;
+    if (typeof _geoSuccess === "function") {
+      window.__onGeoSuccess = function(pos){
+        try {
+          const geo = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+          window.__last_geo = geo;
+          emitLocation(geo);
+        } catch(e){}
+        return _geoSuccess.apply(this, arguments);
+      }
+    }
+
+    // If the page sets online via API, we also emit online when it succeeds.
+    const _api = window.api;
+    if (typeof _api === "function") {
+      window.api = async function(url, opts){
+        const resp = await _api.apply(this, arguments);
+        try {
+          if (typeof url === "string" && url.includes("/api/driver/set_online") && opts && opts.body && opts.body.online === true) {
+            emitOnline(opts.body);
+          }
+          if (typeof url === "string" && url.includes("/api/driver/location") && opts && opts.body && opts.body.lat != null) {
+            window.__last_geo = opts.body;
+            emitLocation(opts.body);
+          }
+        } catch(e){}
+        return resp;
+      }
+    }
+
+    socket.on("new-order", (order) => {
+      // Minimal Bolt-like popup (non-breaking)
+      try {
+        const msg = "🚕 Yeni sifariş gəldi!\n\n" +
+          (order && order.pickup ? ("📍 Götürmə: " + order.pickup + "\n") : "") +
+          (order && order.dropoff ? ("🏁 Çatdırma: " + order.dropoff + "\n") : "") +
+          (order && order.price ? ("💰 Qiymət: " + order.price + " AZN\n") : "");
+        alert(msg);
+      } catch(e) {}
+      console.log("new-order", order);
+    });
+  } catch(e) {
+    console.warn("socket init failed", e);
+  }
+})();
+</script>
+
 </body>
 </html>
