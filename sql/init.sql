@@ -1,0 +1,98 @@
+-- PayTaksi (Telegram WebApp) PostgreSQL schema
+
+CREATE TABLE IF NOT EXISTS pricing_settings (
+  id INT PRIMARY KEY DEFAULT 1,
+  base_fare NUMERIC(10,2) NOT NULL DEFAULT 3.50,
+  included_km NUMERIC(10,2) NOT NULL DEFAULT 3.00,
+  per_km NUMERIC(10,2) NOT NULL DEFAULT 0.40,
+  commission_rate NUMERIC(5,4) NOT NULL DEFAULT 0.10,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO pricing_settings (id) VALUES (1)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS passengers (
+  id BIGSERIAL PRIMARY KEY,
+  tg_id BIGINT,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  phone TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS drivers (
+  id BIGSERIAL PRIMARY KEY,
+  tg_id BIGINT,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  phone TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  is_approved BOOLEAN NOT NULL DEFAULT FALSE,
+  is_online BOOLEAN NOT NULL DEFAULT FALSE,
+  rating NUMERIC(3,2) NOT NULL DEFAULT 5.00,
+  total_earn NUMERIC(12,2) NOT NULL DEFAULT 0,
+  last_lat DOUBLE PRECISION,
+  last_lng DOUBLE PRECISION,
+  last_seen TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS cars (
+  id BIGSERIAL PRIMARY KEY,
+  driver_id BIGINT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+  brand TEXT NOT NULL,
+  model TEXT NOT NULL,
+  year INT NOT NULL,
+  plate_number TEXT NOT NULL,
+  photo_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS driver_documents (
+  id BIGSERIAL PRIMARY KEY,
+  driver_id BIGINT NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+  doc_type TEXT NOT NULL,
+  photo_url TEXT NOT NULL,
+  verified BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS trips (
+  id BIGSERIAL PRIMARY KEY,
+  passenger_id BIGINT NOT NULL REFERENCES passengers(id) ON DELETE RESTRICT,
+  driver_id BIGINT REFERENCES drivers(id) ON DELETE SET NULL,
+  pickup_lat DOUBLE PRECISION NOT NULL,
+  pickup_lng DOUBLE PRECISION NOT NULL,
+  drop_lat DOUBLE PRECISION NOT NULL,
+  drop_lng DOUBLE PRECISION NOT NULL,
+  distance_km NUMERIC(10,3),
+  fare NUMERIC(10,2),
+  commission NUMERIC(10,2),
+  driver_earn NUMERIC(10,2),
+  payment_method TEXT NOT NULL DEFAULT 'cash',
+  status TEXT NOT NULL DEFAULT 'SEARCHING',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trips_status ON trips(status);
+
+CREATE TABLE IF NOT EXISTS trip_events (
+  id BIGSERIAL PRIMARY KEY,
+  trip_id BIGINT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id BIGSERIAL PRIMARY KEY,
+  admin_user TEXT,
+  action TEXT NOT NULL,
+  payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
