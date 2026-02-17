@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>PayTaksi — Sifariş</title>
+
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <link rel="stylesheet" href="/mini/static/mini-passenger.css" />
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div class="topbar">
+      <div class="brand">PayTaksi</div>
+      <button id="btnLocate" class="icon">📍</button>
+    </div>
+
+    <div id="sheet" class="sheet">
+      <div class="handle"></div>
+
+      <div id="stepSearch">
+        <div class="field">
+          <label>Haradan</label>
+          <input id="pickupInput" placeholder="Cari yer" />
+          <div id="pickupHint" class="hint"></div>
+        </div>
+
+        <div class="field">
+          <label>Hara</label>
+          <input id="destInput" placeholder="Ünvan yazın…" autocomplete="off" />
+          <div id="destResults" class="results"></div>
+        </div>
+
+        <div class="row">
+          <div class="card">
+            <div class="muted">Məsafə</div>
+            <div id="distance" class="big">—</div>
+          </div>
+          <div class="card">
+            <div class="muted">Qiymət</div>
+            <div id="fare" class="big">—</div>
+          </div>
+        </div>
+
+        <button id="btnOrder" class="btn primary" disabled>PayTaksi çağır</button>
+        <div class="muted small">Start 3.50 AZN · 3 km-dən sonra 0.40 AZN/km</div>
+      </div>
+
+      <div id="stepSearching" class="hidden">
+        <div class="center">
+          <div class="spinner"></div>
+          <div class="title">Sürücü axtarılır…</div>
+          <div id="searchInfo" class="muted">—</div>
+        </div>
+        <button id="btnCancel" class="btn danger">Ləğv et</button>
+      </div>
+
+      <div id="stepMatched" class="hidden">
+        <div class="center">
+          <div class="title">✅ Sürücü tapıldı</div>
+          <div id="matchedInfo" class="muted">Telegram-da bildiriş gələcək.</div>
+        </div>
+        <button id="btnClose" class="btn">Bağla</button>
+      </div>
+    </div>
+
+    <script src="/mini/static/mini-passenger.js"></script>
+  </body>
+</html>

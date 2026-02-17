@@ -5,6 +5,7 @@ import { buildPassengerBot } from './bots/passenger.js';
 import { buildDriverBot } from './bots/driver.js';
 import { buildAdminBot } from './bots/admin.js';
 import { buildAdminWeb } from './web/admin.js';
+import { buildMiniWeb } from './web/mini.js';
 
 // --- Helpers
 async function listEligibleDrivers() {
@@ -206,6 +207,13 @@ driverBot.action(/ride_finish:(\d+)/, async (ctx) => {
 const app = express();
 app.get('/', (req, res) => res.send('PayTaksi service is running.'));
 app.use(buildAdminWeb());
+app.use(
+  buildMiniWeb({
+    passengerBot,
+    driverBot,
+    listEligibleDrivers,
+  })
+);
 
 // Health
 app.get('/health', (req, res) => res.json({ ok: true }));

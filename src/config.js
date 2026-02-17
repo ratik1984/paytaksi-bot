@@ -16,6 +16,10 @@ export const cfg = {
 
   webhookSecret: process.env.WEBHOOK_SECRET || '',
 
+  // Telegram Mini App (WebApp) initData verification
+  // If you are testing locally without Telegram, set ALLOW_TG_UNSAFE=1 and pass tg_id as query param.
+  allowTgUnsafe: String(process.env.ALLOW_TG_UNSAFE || '0') === '1',
+
   pricing: {
     baseFare: Number(process.env.BASE_FARE_AZN || 3.5),
     baseDistanceKm: Number(process.env.BASE_DISTANCE_KM || 3),
