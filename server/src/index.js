@@ -69,9 +69,13 @@ async function main() {
   const hookAdmin = `/tg/${secret}/admin`;
 
   // Mount webhook handlers
-  app.use(hookPassenger, bots.passenger.webhookCallback(hookPassenger));
-  app.use(hookDriver, bots.driver.webhookCallback(hookDriver));
-  app.use(hookAdmin, bots.admin.webhookCallback(hookAdmin));
+  // IMPORTANT: Do NOT mount with app.use(path, ...) here.
+  // Telegraf's webhookCallback(path) already checks the path internally.
+  // When mounted with Express at a sub-path, Express strips the mount prefix
+  // (req.url becomes '/'), causing Telegraf to return 404.
+  app.use(bots.passenger.webhookCallback(hookPassenger));
+  app.use(bots.driver.webhookCallback(hookDriver));
+  app.use(bots.admin.webhookCallback(hookAdmin));
 
   // Register webhooks (overwrites previous webhook; also stops the need for polling)
   await bots.passenger.telegram.setWebhook(`${baseUrl}${hookPassenger}`);
