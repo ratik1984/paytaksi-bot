@@ -1,0 +1,37 @@
+<%- include('layout_header') %>
+
+<div class="card p-3">
+  <h5 class="mb-3">Gedişlər</h5>
+  <div class="table-responsive">
+    <table class="table table-dark table-striped align-middle">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Status</th>
+          <th>Müştəri</th>
+          <th>Sürücü</th>
+          <th>Məsafə</th>
+          <th>Qiymət</th>
+          <th>Komissiya</th>
+          <th>Tarix</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% rides.forEach(r => { %>
+          <tr>
+            <td>#<%= r.id %></td>
+            <td><span class="badge bg-info"><%= r.status %></span></td>
+            <td><%= (r.p_first||'') %> <%= (r.p_last||'') %> <span class="muted"><%= r.p_phone||'' %></span></td>
+            <td><%= (r.d_first||'') %> <%= (r.d_last||'') %> <span class="muted"><%= r.d_phone||'' %></span></td>
+            <td><%= r.distance_km ? Number(r.distance_km).toFixed(2)+' km' : '-' %></td>
+            <td><%= r.fare_azn ? money2(r.fare_azn)+' ₼' : '-' %></td>
+            <td><%= r.commission_azn ? money2(r.commission_azn)+' ₼' : '-' %></td>
+            <td class="muted"><%= r.requested_at ? new Date(r.requested_at).toLocaleString('az-AZ') : '' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('layout_footer') %>
