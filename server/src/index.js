@@ -14,15 +14,30 @@ const { createAdminBot } = require('./bots/admin');
 const { registerApi } = require('./api/routes');
 const { registerSocket } = require('./realtime/socket');
 
+function mustGetEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env: ${name}`);
+  return v;
+}
+
 async function main() {
   const app = express();
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(morgan('dev'));
   app.use(express.json({ limit: '2mb' }));
 
+  // Health check (Render expects an open port)
+  app.get('/health', (req, res) => res.status(200).send('ok'));
+
   const server = http.createServer(app);
   const io = new Server(server, {
-    cors: { origin: '*', methods: ['GET','POST'] }
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+  });
+
+  // Start listening ASAP so Render detects the port even if bots/DB have issues.
+  const port = process.env.PORT || 10000;
+  server.listen(port, () => {
+    console.log(`PayTaksi server listening on :${port}`);
   });
 
   const pool = getPool();
@@ -32,40 +47,53 @@ async function main() {
   const publicDir = path.join(__dirname, '..', 'public');
   app.use('/', express.static(publicDir));
 
-  // API
+  // Create bots
   const bots = {};
   bots.passenger = createPassengerBot({ pool });
   bots.driver = createDriverBot({ pool, getPassengerBot: () => bots.passenger });
   bots.admin = createAdminBot({ pool, getDriverBot: () => bots.driver });
 
+  // API + realtime
   registerApi(app, { pool, io, bots });
   registerSocket(io, { pool, bots });
 
-  // Launch bots (long polling)
-  await bots.passenger.launch();
-  await bots.driver.launch();
-  await bots.admin.launch();
+  // --- Telegram webhooks (fixes getUpdates conflict on Render) ---
+  // IMPORTANT:
+  // - APP_BASE_URL must be your public HTTPS domain (e.g. https://paytaksi-telegram.onrender.com)
+  // - WEBHOOK_SECRET should be a long random string
+  const baseUrl = mustGetEnv('APP_BASE_URL').replace(/\/$/, '');
+  const secret = (process.env.WEBHOOK_SECRET || 'paytaksi').replace(/[^a-zA-Z0-9_-]/g, '');
 
+  const hookPassenger = `/tg/${secret}/passenger`;
+  const hookDriver = `/tg/${secret}/driver`;
+  const hookAdmin = `/tg/${secret}/admin`;
+
+  // Mount webhook handlers
+  app.use(hookPassenger, bots.passenger.webhookCallback(hookPassenger));
+  app.use(hookDriver, bots.driver.webhookCallback(hookDriver));
+  app.use(hookAdmin, bots.admin.webhookCallback(hookAdmin));
+
+  // Register webhooks (overwrites previous webhook; also stops the need for polling)
+  await bots.passenger.telegram.setWebhook(`${baseUrl}${hookPassenger}`);
+  await bots.driver.telegram.setWebhook(`${baseUrl}${hookDriver}`);
+  await bots.admin.telegram.setWebhook(`${baseUrl}${hookAdmin}`);
+
+  console.log('Webhooks set:');
+  console.log(`- passenger: ${baseUrl}${hookPassenger}`);
+  console.log(`- driver:    ${baseUrl}${hookDriver}`);
+  console.log(`- admin:     ${baseUrl}${hookAdmin}`);
+
+  // Graceful shutdown
   process.once('SIGINT', () => {
-    bots.passenger.stop('SIGINT');
-    bots.driver.stop('SIGINT');
-    bots.admin.stop('SIGINT');
     server.close();
   });
   process.once('SIGTERM', () => {
-    bots.passenger.stop('SIGTERM');
-    bots.driver.stop('SIGTERM');
-    bots.admin.stop('SIGTERM');
     server.close();
-  });
-
-  const port = process.env.PORT || 10000;
-  server.listen(port, () => {
-    console.log(`PayTaksi server listening on :${port}`);
   });
 }
 
 main().catch((e) => {
   console.error(e);
-  process.exit(1);
+  // Do NOT crash the process hard; keep port open so Render is happy.
+  // If DB/bots failed, logs will show the error and you can fix env values.
 });
