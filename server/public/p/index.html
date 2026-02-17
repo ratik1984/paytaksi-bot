@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi — Sifariş</title>
+  <link rel="stylesheet" href="/shared/app.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <div class="header">🚕 PayTaksi <span class="badge">Passenger</span></div>
+  <div class="container">
+    <div class="card">
+      <div id="map"></div>
+      <div class="small" style="margin-top:10px;">📍 Mövqeyiniz avtomatik götürülür. Sonra gedəcəyiniz ünvanı yazın.</div>
+    </div>
+
+    <div class="card">
+      <input id="q" class="input" placeholder="Haraya? (ünvan yazın)" />
+      <div id="suggest" class="list"></div>
+    </div>
+
+    <div class="card" id="quoteCard" style="display:none;">
+      <div class="row" style="justify-content:space-between;">
+        <div>
+          <div style="font-weight:800;">Qiymət</div>
+          <div class="small" id="quoteMeta"></div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-weight:900;font-size:26px;" id="quotePrice">0.00 AZN</div>
+          <div class="small">(MVP surge: 1x)</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;" class="row">
+        <button class="btn green" id="orderBtn" style="flex:1;">Sifarişi göndər</button>
+        <button class="btn gray" id="resetBtn">Sıfırla</button>
+      </div>
+      <div class="small" id="status" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <script src="/shared/app.js"></script>
+  <script>
+    const tgId = getTgId();
+    const statusEl = document.getElementById('status');
+
+    let map, meMarker, driversLayer;
+    let pickup = null;
+    let dropoff = null;
+    let quote = null;
+    let rideId = null;
+
+    function initMap(lat, lng) {
+      map = L.map('map').setView([lat, lng], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+
+      meMarker = L.marker([lat, lng]).addTo(map).bindPopup('Siz burdasınız');
+      driversLayer = L.layerGroup().addTo(map);
+
+      pickup = { lat, lng, text: 'Mövcud yer' };
+
+      // Live drivers
+      const socket = connectSocket();
+      socket.emit('join', { role: 'passenger', tg_id: tgId });
+      socket.on('driver_location', (d) => {
+        // simple: show few markers
+        const m = L.circleMarker([d.lat, d.lng], { radius: 6 });
+        m.addTo(driversLayer);
+        setTimeout(() => driversLayer.removeLayer(m), 15000);
+      });
+
+      socket.on('ride_update', (u) => {
+        if (!rideId || u.ride_id !== rideId) return;
+        setStatus(statusEl, 'Sifariş statusu: ' + u.status);
+      });
+    }
+
+    function setQuoteVisible(v) {
+      document.getElementById('quoteCard').style.display = v ? 'block' : 'none';
+    }
+
+    async function searchSuggest(q) {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`;
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      return r.json();
+    }
+
+    function renderSuggest(items) {
+      const wrap = document.getElementById('suggest');
+      wrap.innerHTML = '';
+      items.forEach(it => {
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.textContent = it.display_name;
+        div.onclick = async () => {
+          dropoff = { lat: Number(it.lat), lng: Number(it.lon), text: it.display_name };
+          L.marker([dropoff.lat, dropoff.lng]).addTo(map);
+          map.setView([dropoff.lat, dropoff.lng], 13);
+          await loadQuote();
+        };
+        wrap.appendChild(div);
+      });
+    }
+
+    async function loadQuote() {
+      setStatus(statusEl, 'Qiymət hesablanır...');
+      const data = await apiPost('/api/quote', { pickup, dropoff });
+      quote = data;
+      document.getElementById('quotePrice').textContent = money(data.fare.total_fare) + ' AZN';
+      document.getElementById('quoteMeta').textContent = `${data.distance_km} km • ~${data.duration_min} dəq`;
+      setQuoteVisible(true);
+      setStatus(statusEl, 'Hazırdır. İstəsən sifariş et.');
+    }
+
+    document.getElementById('q').addEventListener('input', async (e) => {
+      const q = e.target.value.trim();
+      if (q.length < 3) return (document.getElementById('suggest').innerHTML = '');
+      const items = await searchSuggest(q);
+      renderSuggest(items);
+    });
+
+    document.getElementById('orderBtn').onclick = async () => {
+      if (!tgId) return alert('tg_id yoxdur');
+      if (!pickup || !dropoff) return;
+      setStatus(statusEl, 'Sifariş göndərilir...');
+      const data = await apiPost('/api/rides', {
+        passenger_tg_id: tgId,
+        pickup,
+        dropoff
+      });
+      rideId = data.ride_id;
+      setStatus(statusEl, 'Sifariş yaradıldı. Sürücü axtarılır... (#' + rideId.slice(0,6) + ')');
+    };
+
+    document.getElementById('resetBtn').onclick = () => {
+      location.reload();
+    };
+
+    // Geolocation
+    navigator.geolocation.getCurrentPosition(
+      (pos) => initMap(pos.coords.latitude, pos.coords.longitude),
+      () => initMap(40.4093, 49.8671)
+    );
+  </script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PayTaksi — Admin</title>
+  <link rel="stylesheet" href="/shared/app.css" />
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <div class="header">🛠 PayTaksi <span class="badge">Admin</span></div>
+  <div class="container">
+    <div class="card">
+      <div style="font-weight:900;">Qiymət ayarları</div>
+      <div class="grid2" style="margin-top:10px;">
+        <div>
+          <div class="small">Başlanğıc</div>
+          <input id="baseFare" class="input" type="number" step="0.01" />
+        </div>
+        <div>
+          <div class="small">Daxil km</div>
+          <input id="incKm" class="input" type="number" step="0.1" />
+        </div>
+        <div>
+          <div class="small">1 km qiyməti</div>
+          <input id="perKm" class="input" type="number" step="0.01" />
+        </div>
+        <div>
+          <div class="small">Komissiya %</div>
+          <input id="comm" class="input" type="number" step="0.1" />
+        </div>
+      </div>
+      <button class="btn green" id="savePricing" style="width:100%;margin-top:10px;">Yadda saxla</button>
+      <div class="small" id="pricingStatus" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:900;">Pending sürücülər</div>
+      <div class="small">Yeni qeydiyyatlar burada görünəcək.</div>
+      <div id="drivers" class="list" style="margin-top:10px;"></div>
+      <button class="btn gray" id="refresh" style="width:100%;">Yenilə</button>
+    </div>
+  </div>
+
+  <script src="/shared/app.js"></script>
+  <script>
+    const adminId = getTgId();
+    const driversEl = document.getElementById('drivers');
+    const pricingStatus = document.getElementById('pricingStatus');
+
+    async function loadPricing() {
+      const s = await apiGet('/api/settings');
+      document.getElementById('baseFare').value = s.pricing.baseFare;
+      document.getElementById('incKm').value = s.pricing.includedKm;
+      document.getElementById('perKm').value = s.pricing.perKm;
+      document.getElementById('comm').value = s.pricing.commissionPct;
+    }
+
+    async function loadDrivers() {
+      driversEl.innerHTML = 'Yüklənir...';
+      const r = await apiGet('/api/admin/pending_drivers?tg_id=' + adminId);
+      const items = r.items || [];
+      driversEl.innerHTML = '';
+      if (items.length === 0) {
+        driversEl.innerHTML = '<div class="small">Pending sürücü yoxdur.</div>';
+        return;
+      }
+      items.forEach(d => {
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.style.whiteSpace = 'pre-wrap';
+        div.textContent = `👤 ${d.first_name || ''} ${d.last_name || ''}\n📞 ${d.phone_e164 || ''}\n🚗 ${d.car_make || ''} ${d.car_model || ''} (${d.car_color || ''})\nTG: ${d.telegram_id}`;
+
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.style.marginTop = '8px';
+
+        const ok = document.createElement('button');
+        ok.className = 'btn green';
+        ok.textContent = 'Təsdiqlə';
+        ok.style.flex = '1';
+        ok.onclick = async () => {
+          await apiPost('/api/admin/approve_driver', { admin_tg_id: adminId, driver_tg_id: Number(d.telegram_id), approve: true });
+          await loadDrivers();
+        };
+
+        const no = document.createElement('button');
+        no.className = 'btn red';
+        no.textContent = 'Rədd et';
+        no.style.flex = '1';
+        no.onclick = async () => {
+          await apiPost('/api/admin/approve_driver', { admin_tg_id: adminId, driver_tg_id: Number(d.telegram_id), approve: false });
+          await loadDrivers();
+        };
+
+        row.appendChild(ok);
+        row.appendChild(no);
+        div.appendChild(row);
+        driversEl.appendChild(div);
+      });
+    }
+
+    document.getElementById('refresh').onclick = loadDrivers;
+
+    document.getElementById('savePricing').onclick = async () => {
+      pricingStatus.textContent = 'Yadda saxlanır...';
+      await apiPost('/api/admin/pricing', {
+        admin_tg_id: adminId,
+        base_fare: Number(document.getElementById('baseFare').value),
+        included_km: Number(document.getElementById('incKm').value),
+        per_km: Number(document.getElementById('perKm').value),
+        commission_pct: Number(document.getElementById('comm').value)
+      });
+      pricingStatus.textContent = '✅ Yadda saxlandı';
+    };
+
+    loadPricing().catch(()=>{});
+    loadDrivers().catch(()=>{});
+  </script>
+</body>
+</html>
