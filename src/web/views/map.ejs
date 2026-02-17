@@ -1,0 +1,35 @@
+<% layout('layout') -%>
+<h4>Xəritə (OSM/Leaflet)</h4>
+<div id="map" style="height:70vh" class="border"></div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+const map = L.map('map').setView([40.4093, 49.8671], 11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+async function refresh(){
+  const res = await fetch('/admin/api/map');
+  const data = await res.json();
+  // simple clear by removing all markers layers except tile
+  map.eachLayer((layer) => { if (!layer._url) map.removeLayer(layer); });
+
+  data.drivers.forEach(d => {
+    if (d.lastLat && d.lastLng){
+      L.marker([d.lastLat, d.lastLng]).addTo(map)
+        .bindPopup('Sürücü: ' + (d.user.firstName||'') + ' ' + (d.user.lastName||'') + '<br>Plate: ' + (d.carPlate||'-'));
+    }
+  });
+
+  data.rides.forEach(r => {
+    L.circleMarker([r.pickupLat, r.pickupLng], { radius:7 }).addTo(map)
+      .bindPopup('Ride ' + r.id + '<br>Status: ' + r.status);
+  });
+}
+refresh();
+setInterval(refresh, 10000);
+</script>

@@ -1,0 +1,20 @@
+<% layout('layout') -%>
+<h4>Sifarişlər</h4>
+<table class="table table-sm table-striped">
+  <thead><tr>
+    <th>Tarix</th><th>Status</th><th>Passenger TG</th><th>Driver TG</th><th>KM</th><th>Fare</th><th>Comm</th>
+  </tr></thead>
+  <tbody>
+  <% rides.forEach(r => { %>
+    <tr>
+      <td><%= r.createdAt.toISOString().slice(0,16).replace('T',' ') %></td>
+      <td><%= r.status %></td>
+      <td><%= r.passenger.telegramId %></td>
+      <td><%= r.driver ? r.driver.telegramId : '-' %></td>
+      <td><%= r.distanceKm ? r.distanceKm.toFixed(1) : '-' %></td>
+      <td><%= r.fareAzN ?? '-' %></td>
+      <td><%= r.commissionAzN ?? '-' %></td>
+    </tr>
+  <% }) %>
+  </tbody>
+</table>

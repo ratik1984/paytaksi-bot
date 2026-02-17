@@ -1,0 +1,21 @@
+<% layout('layout') -%>
+<div class="row g-3">
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <h5>Pending sürücülər</h5>
+      <div class="display-6"><%= counts.driversPending %></div>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <h5>Pending top-up</h5>
+      <div class="display-6"><%= counts.topupsPending %></div>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <h5>Aktiv sifarişlər</h5>
+      <div class="display-6"><%= counts.ridesActive %></div>
+    </div></div>
+  </div>
+</div>

@@ -1,0 +1,27 @@
+<% layout('layout') -%>
+<h4>TopUp sorğuları</h4>
+<table class="table table-sm table-striped">
+  <thead><tr>
+    <th>Tarix</th><th>Status</th><th>Telegram</th><th>Məbləğ</th><th>Qəbz file_id</th><th>Actions</th>
+  </tr></thead>
+  <tbody>
+  <% topups.forEach(t => { %>
+    <tr>
+      <td><%= t.createdAt.toISOString().slice(0,16).replace('T',' ') %></td>
+      <td><%= t.status %></td>
+      <td><%= t.user.telegramId %></td>
+      <td><%= t.amountAzN %></td>
+      <td style="max-width:250px; word-break:break-all"><%= t.receiptFileId %></td>
+      <td>
+        <form method="post" action="/admin/topups/<%= t.id %>/approve" style="display:inline">
+          <button class="btn btn-success btn-sm">Approve</button>
+        </form>
+        <form method="post" action="/admin/topups/<%= t.id %>/reject" style="display:inline">
+          <button class="btn btn-danger btn-sm">Reject</button>
+        </form>
+      </td>
+    </tr>
+  <% }) %>
+  </tbody>
+</table>
+<p class="text-muted">Qeyd: MVP-də qəbzin özünü Telegram file_id kimi saxlayırıq. İstəsəniz sonradan faylı serverə yükləmə funksiyası əlavə edərik.</p>

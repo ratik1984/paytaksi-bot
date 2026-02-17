@@ -1,0 +1,26 @@
+<% layout('layout') -%>
+<h4>Sürücülər</h4>
+<table class="table table-sm table-striped">
+  <thead><tr>
+    <th>Status</th><th>Ad</th><th>Telefon</th><th>Avto</th><th>Nömrə</th><th>Actions</th>
+  </tr></thead>
+  <tbody>
+  <% drivers.forEach(d => { %>
+    <tr>
+      <td><%= d.status %></td>
+      <td><%= (d.user.firstName||'') + ' ' + (d.user.lastName||'') %></td>
+      <td><%= d.user.phone || '-' %></td>
+      <td><%= d.carBrandModel || '-' %></td>
+      <td><%= d.carPlate || '-' %></td>
+      <td>
+        <form method="post" action="/admin/drivers/<%= d.id %>/approve" style="display:inline">
+          <button class="btn btn-success btn-sm">Approve</button>
+        </form>
+        <form method="post" action="/admin/drivers/<%= d.id %>/reject" style="display:inline">
+          <button class="btn btn-danger btn-sm">Reject</button>
+        </form>
+      </td>
+    </tr>
+  <% }) %>
+  </tbody>
+</table>

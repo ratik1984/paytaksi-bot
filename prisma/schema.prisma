@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PASSENGER
+  DRIVER
+  ADMIN
+}
+
+enum DriverStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RideStatus {
+  REQUESTED
+  OFFERED
+  ACCEPTED
+  STARTED
+  COMPLETED
+  CANCELED
+}
+
+enum TopUpStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id            String   @id @default(uuid())
+  telegramId    String   @unique
+  role          UserRole
+  firstName     String?
+  lastName      String?
+  phone         String?
+  createdAt     DateTime @default(now())
+
+  passengerProfile PassengerProfile?
+  driverProfile    DriverProfile?
+  adminProfile     AdminProfile?
+
+  balanceLedger BalanceLedger[]
+  topUps        TopUpRequest[]
+  driverRides   Ride[] @relation("DriverRides")
+  passengerRides Ride[] @relation("PassengerRides")
+}
+
+model PassengerProfile {
+  id        String @id @default(uuid())
+  userId    String @unique
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DriverProfile {
+  id              String       @id @default(uuid())
+  userId          String       @unique
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status          DriverStatus @default(PENDING)
+  carBrandModel   String?
+  carPlate        String?
+  carYear         Int?
+  carPhotoFileId  String?
+  documents       DriverDocument[]
+  lastLat         Float?
+  lastLng         Float?
+  lastLocationAt  DateTime?
+}
+
+model DriverDocument {
+  id        String @id @default(uuid())
+  driverId  String
+  driver    DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  docType   String
+  fileId    String
+  createdAt DateTime @default(now())
+}
+
+model Ride {
+  id            String     @id @default(uuid())
+  status        RideStatus @default(REQUESTED)
+
+  passengerId   String
+  passenger     User       @relation("PassengerRides", fields: [passengerId], references: [id])
+  driverId      String?
+  driver        User?      @relation("DriverRides", fields: [driverId], references: [id])
+
+  pickupLat     Float
+  pickupLng     Float
+  pickupAddress String?
+  dropLat       Float
+  dropLng       Float
+  dropAddress   String?
+
+  distanceKm    Float?
+  fareAzN       Float?
+  commissionAzN Float?
+
+  createdAt     DateTime @default(now())
+  acceptedAt    DateTime?
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  events        RideEvent[]
+}
+
+model RideEvent {
+  id        String   @id @default(uuid())
+  rideId    String
+  ride      Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  eventType String
+  metaJson  String?
+  createdAt DateTime @default(now())
+}
+
+model BalanceLedger {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountAzN Float
+  reason    String
+  createdAt DateTime @default(now())
+}
+
+model TopUpRequest {
+  id        String     @id @default(uuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountAzN Float
+  receiptFileId String
+  status    TopUpStatus @default(PENDING)
+  note      String?
+  createdAt DateTime @default(now())
+  decidedAt DateTime?
+}
+
+model AdminProfile {
+  id        String @id @default(uuid())
+  userId    String @unique
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String @unique
+  passwordHash String
+}
